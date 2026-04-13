@@ -1,0 +1,15 @@
+{$FORGEJO_DOMAIN} {
+    reverse_proxy forgejo:3000
+}
+
+{$INFISICAL_DOMAIN} {
+    reverse_proxy infisical:8080
+}
+
+# Static pages hosting — each project gets a subdirectory
+# Access at: https://<FORGEJO_DOMAIN>/pages/<project>/
+{$FORGEJO_DOMAIN}/pages/* {
+    root * /srv/pages
+    uri strip_prefix /pages
+    file_server
+}

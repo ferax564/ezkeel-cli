@@ -1,0 +1,60 @@
+name: {{PROJECT_NAME}}
+version: "1.0"
+
+visibility:
+  default: private
+  public_paths:
+    - src/
+    - docs/
+    - tests/
+    - README.md
+    - LICENSE
+    - CONTRIBUTING.md
+  private_paths:
+    - plans/
+    - internal/
+    - .claude/
+    - workspace.yaml
+
+secrets:
+  required:
+    - ANTHROPIC_API_KEY
+  infisical_project: {{PROJECT_NAME}}
+  environments:
+    - dev
+    - staging
+    - prod
+
+ai:
+  models:
+    primary: claude-opus-4-6
+    fast: claude-sonnet-4-6
+    local: ollama/qwen3-coder
+  instructions: CLAUDE.md
+  agents: AGENTS.md
+  mcp_servers:
+    - name: filesystem
+      command: npx -y @modelcontextprotocol/server-filesystem
+      args: ["."]
+  persona:
+    skills_dir: .claude/skills/
+    hooks_dir: .claude/hooks/
+    commands_dir: .claude/commands/
+    settings: .claude/settings.json
+
+environment:
+  type: devcontainer
+  file: .devcontainer/devcontainer.json
+  post_create:
+    - ezkeel secrets inject dev
+
+ci:
+  provider: forgejo-actions
+  workflows_dir: .forgejo/workflows/
+  on_push:
+    - lint
+    - test
+
+deploy:
+  provider: ""
+  environments: {}

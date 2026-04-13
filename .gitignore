@@ -1,0 +1,21 @@
+# Build outputs
+/ezkeel
+/ezkeel-agent
+/dist/
+*.exe
+*.test
+*.out
+
+# Go
+/vendor/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local dev
+.env
+.env.*
+!.env.example

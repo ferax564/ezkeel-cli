@@ -1,0 +1,32 @@
+[
+  {
+    "slug": "todo-list",
+    "name": "Todo List",
+    "description": "Express + PostgreSQL todo app with REST API",
+    "icon": "check-square",
+    "repo_url": "https://git.ezkeel.com/ezkeel-templates/todo-list.git",
+    "framework": "express",
+    "needs_database": true,
+    "port": 3000
+  },
+  {
+    "slug": "url-shortener",
+    "name": "URL Shortener",
+    "description": "Express + PostgreSQL link shortener with hash routes",
+    "icon": "link",
+    "repo_url": "https://git.ezkeel.com/ezkeel-templates/url-shortener.git",
+    "framework": "express",
+    "needs_database": true,
+    "port": 3000
+  },
+  {
+    "slug": "static-portfolio",
+    "name": "Static Portfolio",
+    "description": "Plain HTML portfolio served by Caddy — no database",
+    "icon": "file",
+    "repo_url": "https://git.ezkeel.com/ezkeel-templates/static-portfolio.git",
+    "framework": "static",
+    "needs_database": false,
+    "port": 80
+  }
+]

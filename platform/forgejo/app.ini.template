@@ -1,0 +1,35 @@
+APP_NAME = EZKeel
+RUN_MODE = prod
+
+[server]
+DOMAIN           = {{FORGEJO_DOMAIN}}
+ROOT_URL         = https://{{FORGEJO_DOMAIN}}/
+HTTP_PORT        = 3000
+SSH_DOMAIN       = {{FORGEJO_DOMAIN}}
+SSH_PORT         = 22
+DISABLE_SSH      = false
+LFS_START_SERVER = true
+
+[database]
+DB_TYPE  = postgres
+HOST     = postgres:5432
+NAME     = ezkeel
+USER     = ezkeel
+PASSWD   = {{POSTGRES_PASSWORD}}
+SSL_MODE = disable
+
+[actions]
+ENABLED = true
+
+[service]
+DISABLE_REGISTRATION = true
+REQUIRE_SIGNIN_VIEW  = false
+
+[log]
+MODE      = console
+LEVEL     = info
+
+[security]
+INSTALL_LOCK   = true
+SECRET_KEY     = {{FORGEJO_SECRET_KEY}}
+INTERNAL_TOKEN = {{FORGEJO_INTERNAL_TOKEN}}
