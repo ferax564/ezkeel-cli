@@ -1,6 +1,14 @@
+# Images are pinned by sha256 digest after the 2026-04-19 incident. Pulling
+# by floating tag means the next `docker compose pull` could grab a tampered
+# upstream image (any maintainer compromise on Docker Hub / codeberg ripples
+# straight in). To upgrade an image: pull the new tag, copy the digest from
+# `docker inspect --format='{{index .RepoDigests 0}}' <image>`, and replace
+# the @sha256:... below. Floating-tag form is kept in the comment for ops
+# readability.
 services:
   postgres:
-    image: postgres:16-alpine
+    # postgres:16-alpine
+    image: postgres:16-alpine@sha256:93d55776e04376e19adb2733e3ccebb4392ee7dd86d8ff238503b30fe719c84f
     environment:
       POSTGRES_USER: ezkeel
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -15,7 +23,8 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    # redis:7-alpine
+    image: redis:7-alpine@sha256:7aec734b2bb298a1d769fd8729f13b8514a41bf90fcdd1f38ec52267fbaa8ee6
     volumes:
       - redis_data:/data
     healthcheck:
@@ -26,7 +35,8 @@ services:
     restart: unless-stopped
 
   forgejo:
-    image: codeberg.org/forgejo/forgejo:9
+    # codeberg.org/forgejo/forgejo:9
+    image: codeberg.org/forgejo/forgejo:9@sha256:3c34f11fe8b9983096eef3f8f25c2d2c21c4ae7504960cb203f0b075d1d8ed73
     depends_on:
       postgres:
         condition: service_healthy
@@ -38,14 +48,21 @@ services:
       - FORGEJO__database__PASSWD=${POSTGRES_PASSWORD}
       - FORGEJO__server__ROOT_URL=https://${FORGEJO_DOMAIN}
       - FORGEJO__server__DOMAIN=${FORGEJO_DOMAIN}
-      - FORGEJO__actions__ENABLED=true
+      # Forgejo Actions is OFF by default. The runner service below mounts
+      # /var/run/docker.sock — anyone able to push a workflow file can spawn
+      # a privileged container and escape to the host. Until per-repo runner
+      # isolation is in place, Actions stays off and the runner stops on
+      # boot. Re-enable per-deploy by setting EZKEEL_FORGEJO_ACTIONS=true
+      # in the platform .env (and accept the runner-as-host-root risk).
+      - FORGEJO__actions__ENABLED=${EZKEEL_FORGEJO_ACTIONS:-false}
       - FORGEJO__service__DISABLE_REGISTRATION=true
     volumes:
       - forgejo_data:/data
     restart: unless-stopped
 
   infisical:
-    image: infisical/infisical:latest
+    # infisical/infisical:latest — pin to a specific digest, NEVER float :latest
+    image: infisical/infisical:latest@sha256:5f896e2907661926cc92dcd88e5d7a383d5b91df4cb0127528d47235f96f4daa
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,7 +77,8 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2-alpine
+    # caddy:2-alpine
+    image: caddy:2-alpine@sha256:834468128c7696cec0ceea6172f7d692daf645ae51983ca76e39da54a97c570d
     ports:
       - "80:80"
       - "443:443"
@@ -68,13 +86,47 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
       - ./pages:/srv/pages
+    networks:
+      # `default` is the compose-managed network where postgres/redis/
+      # forgejo/infisical sit, so caddy can reverse-proxy them by name.
+      - default
+      # `ezkeel-apps` is the network deployed user apps land on (the
+      # ezkeel-agent runs `docker run --network ezkeel-apps`). Without
+      # this attachment caddy returns 502 for every <name>.apps.ezkeel.com
+      # because it can't resolve the upstream container — caught during
+      # the 2026-04-19 hello-world deploy. The network is declared as
+      # external so compose doesn't recreate it on every `up`.
+      - ezkeel-apps
     environment:
       - FORGEJO_DOMAIN=${FORGEJO_DOMAIN}
       - INFISICAL_DOMAIN=${INFISICAL_DOMAIN}
+      # APP_DOMAIN is consumed by the {$APP_DOMAIN} block in Caddyfile
+      # (control-plane dashboard route). Without this passthrough caddy
+      # expands the var to empty and the block becomes keyless / global,
+      # crashing startup with "server block without any key" — caught
+      # in the 2026-04-19 fresh deploy.
+      - APP_DOMAIN=${APP_DOMAIN}
     restart: unless-stopped
 
+  # Forgejo runner — DISABLED by default after the 2026-04-19 audit.
+  # Mounting /var/run/docker.sock and running as user: "0" means anyone
+  # who can push a workflow file to any repo on this Forgejo instance
+  # can spawn a `--privileged` container, mount the host filesystem,
+  # and gain root on the platform VPS. This is too sharp an edge to
+  # ship enabled without per-repo runner isolation.
+  #
+  # To re-enable for development:
+  #   1. Set EZKEEL_FORGEJO_ACTIONS=true in the platform .env
+  #   2. Set EZKEEL_FORGEJO_RUNNER=true in the platform .env
+  #   3. `docker compose --profile runner up -d`
+  #
+  # Production fix (Tier 2): isolate runner in a separate cheap VPS so
+  # workflow code can't reach platform secrets, OR migrate to a
+  # rootless docker socket proxy (tecnativa/docker-socket-proxy).
   runner:
-    image: code.forgejo.org/forgejo/runner:3.5.1
+    # code.forgejo.org/forgejo/runner:3.5.1
+    image: code.forgejo.org/forgejo/runner:3.5.1@sha256:173389594aeb4a7681ba073edf0498282cf301fe13c72b751f264e198010f3d1
+    profiles: ["runner"]
     entrypoint: /bin/sh
     command:
       - -c
@@ -102,3 +154,14 @@ volumes:
   forgejo_data:
   caddy_data:
   runner_data:
+
+networks:
+  # The default compose-managed network. Listed explicitly so the
+  # caddy service can opt into multiple networks (default + ezkeel-apps).
+  default:
+  # ezkeel-apps is created out-of-band by `ezkeel platform install`
+  # (or manually via `docker network create ezkeel-apps`) before
+  # `docker compose up -d`. The ezkeel-agent attaches every deployed
+  # user app to it; caddy joins it to reach those upstream containers.
+  ezkeel-apps:
+    external: true
