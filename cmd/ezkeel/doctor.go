@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -126,9 +127,80 @@ var doctorCmd = &cobra.Command{
 			}
 		}
 
+		// Check 7: Container security — exposed DB ports + trust auth
+		results = append(results, runContainerSecurityChecks(ctx, client)...)
+
 		printResults(results)
 		return nil
 	},
+}
+
+// dangerousDBPorts maps host-published ports that must never be public.
+// Postgres (5432), MySQL (3306), MongoDB (27017), Redis (6379), Memcached (11211).
+var dangerousDBPorts = []string{"5432", "3306", "27017", "6379", "11211"}
+
+// runContainerSecurityChecks inspects running containers for two recurring
+// operator mistakes that have led to compromise: DB ports bound to 0.0.0.0
+// and trust-mode Postgres auth. Returns one checkResult per finding plus
+// an "OK" result if nothing dangerous was found.
+func runContainerSecurityChecks(ctx remoteCtx, client remoteClient) []checkResult {
+	var out []checkResult
+
+	psOut, psErr := client.RunRemote(ctx, `docker ps --format '{{.Names}}|{{.Ports}}'`)
+	if psErr != nil {
+		return []checkResult{{"Container Ports", false, "could not list containers: " + psErr.Error()}}
+	}
+
+	var exposed []string
+	for _, line := range strings.Split(strings.TrimSpace(psOut), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		name, ports := parts[0], parts[1]
+		for _, port := range dangerousDBPorts {
+			// "0.0.0.0:5432->5432/tcp" or ":::5432->5432/tcp" = exposed publicly
+			if strings.Contains(ports, "0.0.0.0:"+port+"->") || strings.Contains(ports, ":::"+port+"->") {
+				exposed = append(exposed, fmt.Sprintf("%s :%s", name, port))
+			}
+		}
+	}
+
+	if len(exposed) > 0 {
+		out = append(out, checkResult{"Container Ports", false, "DB port published to 0.0.0.0 — " + strings.Join(exposed, ", ") + " (rebind to 127.0.0.1 or remove)"})
+	} else {
+		out = append(out, checkResult{"Container Ports", true, "no DB ports bound to 0.0.0.0"})
+	}
+
+	// trust-mode Postgres auth = anyone who can connect becomes superuser.
+	// Inspect every container's env for the smoking gun.
+	envOut, envErr := client.RunRemote(ctx, `for c in $(docker ps --format '{{.Names}}'); do echo "$c|$(docker inspect "$c" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep -E '^POSTGRES_HOST_AUTH_METHOD=' || true)"; done`)
+	if envErr == nil {
+		var trustContainers []string
+		for _, line := range strings.Split(strings.TrimSpace(envOut), "\n") {
+			parts := strings.SplitN(line, "|", 2)
+			if len(parts) == 2 && strings.Contains(parts[1], "POSTGRES_HOST_AUTH_METHOD=trust") {
+				trustContainers = append(trustContainers, parts[0])
+			}
+		}
+		if len(trustContainers) > 0 {
+			out = append(out, checkResult{"Postgres Auth", false, "trust auth enabled — " + strings.Join(trustContainers, ", ") + " (superuser without password)"})
+		} else {
+			out = append(out, checkResult{"Postgres Auth", true, "no trust-mode containers"})
+		}
+	}
+
+	return out
+}
+
+// remoteCtx and remoteClient match the existing client signature without
+// importing the concrete types here, keeping this file self-contained.
+type remoteCtx = context.Context
+type remoteClient interface {
+	RunRemote(ctx context.Context, cmd string) (string, error)
 }
 
 func printResults(results []checkResult) {

@@ -76,6 +76,23 @@ var platformInstallCmd = &cobra.Command{
 		}
 
 		// Run docker compose up -d
+		// Create the external `ezkeel-apps` network up front. Compose
+		// declares it as `external: true` so it can attach caddy to it
+		// (so caddy can reach <name>.apps.ezkeel.com upstream containers
+		// the agent spawns). Without this pre-creation, `docker compose
+		// up -d` fails with "network ezkeel-apps not found".
+		// `docker network create` is idempotent if we ignore "already
+		// exists" — checking first is the cleanest pattern.
+		netCheck := exec.Command("docker", "network", "inspect", "ezkeel-apps")
+		if err := netCheck.Run(); err != nil {
+			netCreate := exec.Command("docker", "network", "create", "ezkeel-apps")
+			netCreate.Stdout = os.Stdout
+			netCreate.Stderr = os.Stderr
+			if err := netCreate.Run(); err != nil {
+				return fmt.Errorf("docker network create ezkeel-apps: %w", err)
+			}
+		}
+
 		composeCmd := exec.Command("docker", "compose", "--project-directory", dir, "up", "-d")
 		composeCmd.Stdout = os.Stdout
 		composeCmd.Stderr = os.Stderr
