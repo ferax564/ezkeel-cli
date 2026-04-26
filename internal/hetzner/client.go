@@ -92,6 +92,88 @@ func (c *Client) CreateServer(name, serverType, location, sshKeyName string) (*C
 	return &result, nil
 }
 
+// UploadSSHKeyRequest is the body for POST /v1/ssh_keys.
+type UploadSSHKeyRequest struct {
+	Name      string `json:"name"`
+	PublicKey string `json:"public_key"`
+}
+
+// UploadSSHKeyResponse wraps Hetzner's `ssh_key` envelope.
+type UploadSSHKeyResponse struct {
+	SSHKey SSHKeyInfo `json:"ssh_key"`
+}
+
+// SSHKeyInfo is the subset of Hetzner's SSH-key resource we care about.
+type SSHKeyInfo struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// UploadSSHKey registers an SSH public key with the user's Hetzner
+// project. Used by the auto-provisioning flow to inject a fresh
+// per-server keypair before calling CreateServer. The `name` must be
+// unique within the project — callers should namespace by ezkeel
+// server ID to avoid collisions across re-provisions.
+func (c *Client) UploadSSHKey(name, publicKey string) (*UploadSSHKeyResponse, error) {
+	body := UploadSSHKeyRequest{Name: name, PublicKey: publicKey}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", c.baseURL()+"/v1/ssh_keys", bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("hetzner API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result UploadSSHKeyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &result, nil
+}
+
+// DeleteServer removes a server from the user's Hetzner project. Used
+// by the auto-provisioning flow to clean up when EZKeel-side bootstrap
+// fails after Hetzner-side provision succeeded — without this, the user
+// pays Hetzner for a half-broken VPS we couldn't finish setting up.
+//
+// 204 No Content is success. 404 is treated as success because it means
+// the server is already gone (idempotent — safe to retry).
+func (c *Client) DeleteServer(id int) error {
+	req, err := http.NewRequest("DELETE", fmt.Sprintf("%s/v1/servers/%d", c.baseURL(), id), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("hetzner API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+}
+
 // GetServer fetches the current status of a server by ID.
 func (c *Client) GetServer(id int) (*GetServerResponse, error) {
 	req, err := http.NewRequest("GET", fmt.Sprintf("%s/v1/servers/%d", c.baseURL(), id), nil)
