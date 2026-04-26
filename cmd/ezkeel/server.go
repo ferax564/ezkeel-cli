@@ -10,7 +10,7 @@ import (
 
 	"github.com/ferax564/ezkeel-cli/pkg/agent"
 	"github.com/ferax564/ezkeel-cli/internal/config"
-	hetznerPkg "github.com/ferax564/ezkeel-cli/internal/hetzner"
+	hetznerPkg "github.com/ferax564/ezkeel-cli/pkg/hetzner"
 	"github.com/spf13/cobra"
 )
 
