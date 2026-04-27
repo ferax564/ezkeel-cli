@@ -6,19 +6,49 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 const defaultBaseURL = "https://api.hetzner.cloud"
+
+// defaultHTTPTimeout bounds individual Hetzner API calls so a stalled
+// or unreachable Hetzner can't hang an EZKeel HTTP handler indefinitely.
+// 30s is generous — Hetzner's documented p99 for create-server-class
+// calls is ~5s; anything past 30s is realistically a network failure.
+const defaultHTTPTimeout = 30 * time.Second
 
 // Client calls the Hetzner Cloud API.
 type Client struct {
 	Token   string
 	BaseURL string // override for testing
+
+	// HTTPClient is the underlying transport. Optional — when nil,
+	// the package falls back to a shared client with a 30s timeout
+	// so callers don't have to construct their own. Tests override
+	// to inject httptest-backed clients with custom timeouts.
+	HTTPClient *http.Client
 }
 
 // NewClient returns a Hetzner API client with the given token.
 func NewClient(token string) *Client {
 	return &Client{Token: token}
+}
+
+// sharedHTTPClient is the default-timeout client used when Client.HTTPClient
+// is nil. Defined as a package-level var so all client instances share
+// the same connection pool.
+var sharedHTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
+
+// httpClient returns the configured HTTP client, falling back to the
+// shared default-timeout one. Codex flagged the previous unbounded
+// http.DefaultClient usage on the consuming repo's PR review — a
+// stalled Hetzner request would otherwise block the EZKeel HTTP handler
+// past the request context's expectations.
+func (c *Client) httpClient() *http.Client {
+	if c.HTTPClient != nil {
+		return c.HTTPClient
+	}
+	return sharedHTTPClient
 }
 
 type CreateServerRequest struct {
@@ -74,7 +104,7 @@ func (c *Client) CreateServer(name, serverType, location, sshKeyName string) (*C
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}
@@ -129,7 +159,7 @@ func (c *Client) UploadSSHKey(name, publicKey string) (*UploadSSHKeyResponse, er
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}
@@ -161,7 +191,7 @@ func (c *Client) DeleteServer(id int) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("http request: %w", err)
 	}
@@ -182,7 +212,7 @@ func (c *Client) GetServer(id int) (*GetServerResponse, error) {
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}
