@@ -50,8 +50,33 @@ func formatDryRun(info *dryRunInfo) string {
 
 var upCmd = &cobra.Command{
 	Use:   "up [repo-url]",
-	Short: "Deploy an app to your server",
-	RunE:  runUp,
+	Short: "Build, provision, and deploy an app",
+	Long: `Deploy a repo (or the current directory) to a configured EZKeel server.
+
+The pipeline is six steps: detect framework, generate Dockerfile,
+build image, provision services (PostgreSQL when needed), deploy via
+the agent, and run a health check. Each step is reported live; on
+failure the offending step is named so you know where to look.
+
+If the working tree contains a Dockerfile, it is used as-is. Otherwise
+ezkeel writes a Dockerfile.ezkeel tuned to the detected framework.
+Databases are auto-provisioned when ezkeel detects a Postgres client
+in your dependencies, and DATABASE_URL is injected at deploy time.`,
+	Example: `  # Deploy the current directory to the default server
+  ezkeel up
+
+  # Deploy a Forgejo or GitHub repo
+  ezkeel up https://git.example.com/me/myapp
+
+  # Deploy from a curated template
+  ezkeel up --template todo-list
+
+  # Show detection results without deploying
+  ezkeel up --dry-run
+
+  # Pin resources for a memory-tight box
+  ezkeel up --memory 256m --cpus 0.5`,
+	RunE: runUp,
 }
 
 func init() {
@@ -177,13 +202,13 @@ func runUp(cmd *cobra.Command, args []string) error {
 		model.FailStep(0, err.Error())
 		printProgress()
 		printStep(tui.IconFail, "detect framework: "+err.Error())
-		return fmt.Errorf("detecting framework: %w", err)
+		return fmt.Errorf("detecting framework in %s: %w\n\nhint: pass a path with `ezkeel up <repo-url>` or run from the project root", sourceDir, err)
 	}
 	if fr.Framework == detect.FrameworkUnknown {
 		model.FailStep(0, "unknown framework")
 		printProgress()
 		printStep(tui.IconFail, "detect framework: unknown framework")
-		return fmt.Errorf("could not detect framework in %s; add a Dockerfile to deploy manually", sourceDir)
+		return fmt.Errorf("could not detect a supported framework in %s\n\nhint: drop a Dockerfile next to your code and run `ezkeel up` again — ezkeel will use it as-is.\nsupported frameworks: run `ezkeel up --help` or visit https://ezkeel.com/docs.html", sourceDir)
 	}
 
 	dbResult := detect.DetectDatabase(sourceDir)
@@ -228,14 +253,14 @@ func runUp(cmd *cobra.Command, args []string) error {
 			model.FailStep(1, "could not generate dockerfile")
 			printProgress()
 			printStep(tui.IconFail, "generate dockerfile failed")
-			return fmt.Errorf("could not generate Dockerfile for framework %s", fr.Framework)
+			return fmt.Errorf("no Dockerfile template for framework %s\n\nhint: add a Dockerfile to your repo and ezkeel will use it as-is. file an issue at https://github.com/ferax564/ezkeel-cli/issues if you'd like first-class support", fr.Framework)
 		}
 		dockerfilePath = filepath.Join(sourceDir, "Dockerfile.ezkeel")
 		if err := os.WriteFile(dockerfilePath, []byte(content), 0o644); err != nil {
 			model.FailStep(1, err.Error())
 			printProgress()
 			printStep(tui.IconFail, "write dockerfile: "+err.Error())
-			return fmt.Errorf("writing Dockerfile.ezkeel: %w", err)
+			return fmt.Errorf("writing Dockerfile.ezkeel to %s: %w\n\nhint: check that the directory is writable", sourceDir, err)
 		}
 		model.CompleteStep(1, "generated Dockerfile.ezkeel")
 		printStep(tui.IconDone, "generated Dockerfile.ezkeel")
@@ -266,7 +291,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		if !plain {
 			fmt.Println(tui.RenderFailure(appName, "docker build failed: "+err.Error()))
 		}
-		return fmt.Errorf("docker build: %w", err)
+		return fmt.Errorf("docker build %s: %w\n\nhint: re-run with --plain to see full build output, or run `docker build -f %s %s` directly to debug", imageTag, err, dockerfilePath, sourceDir)
 	}
 
 	model.CompleteStep(2, "built "+imageTag)

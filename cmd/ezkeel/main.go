@@ -10,8 +10,23 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "ezkeel",
-	Short: "Deploy any repo to your server in one command",
-	Long:  "EZKeel auto-detects your framework, builds a Docker image, and deploys to your VPS with SSL. Self-hosted for $5/month.",
+	Short: "The home for your coding agent — git push to your VPS",
+	Long: `EZKeel is a self-hosted dev platform for coding agents.
+
+It bundles Forgejo, Caddy, Docker, and an MCP server so that Claude Code,
+Cursor, and Codex CLI work out of the box on your VPS. Push code, ezkeel
+auto-detects the framework, builds an image, provisions databases, issues
+TLS certs, and deploys — without GitHub Actions, without YAML.
+
+Common workflows:
+
+  Provision a fresh server          ezkeel server add --hetzner
+  Deploy a repo                     ezkeel up <repo-url>
+  Launch a coding agent on the box  ezkeel ai claude
+  Stream container logs             ezkeel logs <app>
+  Roll back to the previous deploy  ezkeel rollback <app>
+
+Self-hosted, BYOV, $5/month VPS gets you a working stack. Docs at https://ezkeel.com/docs.html.`,
 }
 
 var versionCmd = &cobra.Command{
