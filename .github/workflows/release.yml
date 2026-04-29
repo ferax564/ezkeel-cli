@@ -101,6 +101,17 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate SHA256SUMS
+        # cli/install.sh downloads SHA256SUMS as a release asset and
+        # verifies the platform-specific binary before chmod/mv. Without
+        # this file the installer falls through to a warn-and-proceed
+        # path. Lists every asset (CLI + agent, all OS/arch pairs) so
+        # anyone scripting against the agent binary can verify too.
+        working-directory: dist
+        run: |
+          sha256sum ezkeel-* > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
