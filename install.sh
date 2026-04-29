@@ -49,6 +49,42 @@ if ! curl -fsSL -o "$TMP" "$URL"; then
   exit 1
 fi
 
+# Checksum verification — verify-if-present. Older releases predate the
+# SHA256SUMS asset; we warn and proceed in that case so reinstalls of
+# pinned old versions still work. New releases publish SHA256SUMS as a
+# release asset; when present we MUST verify or abort.
+SUMS_URL="https://github.com/${REPO}/releases/download/${TAG}/SHA256SUMS"
+SUMS_TMP=$(mktemp)
+if curl -fsSL -o "$SUMS_TMP" "$SUMS_URL" 2>/dev/null; then
+  echo "Verifying SHA256 checksum..."
+  EXPECTED=$(grep " ${ASSET}\$" "$SUMS_TMP" | awk '{print $1}')
+  if [ -z "$EXPECTED" ]; then
+    echo "Error: ${ASSET} not listed in SHA256SUMS — refusing to install"
+    rm -f "$TMP" "$SUMS_TMP"
+    exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL=$(sha256sum "$TMP" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL=$(shasum -a 256 "$TMP" | awk '{print $1}')
+  else
+    echo "Error: neither sha256sum nor shasum available — cannot verify checksum"
+    rm -f "$TMP" "$SUMS_TMP"
+    exit 1
+  fi
+  if [ "$ACTUAL" != "$EXPECTED" ]; then
+    echo "Error: checksum mismatch"
+    echo "  expected: $EXPECTED"
+    echo "  actual:   $ACTUAL"
+    rm -f "$TMP" "$SUMS_TMP"
+    exit 1
+  fi
+  echo "Checksum OK."
+else
+  echo "Warning: SHA256SUMS not published for ${TAG} — proceeding without verification."
+fi
+rm -f "$SUMS_TMP"
+
 chmod +x "$TMP"
 
 # Install — use sudo if needed
