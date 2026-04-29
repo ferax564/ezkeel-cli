@@ -256,6 +256,7 @@ func copyPlatformFile(name, dir string, vars map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("creating parent dir for %q: %w", dst, err)
 	}
+	// #nosec G703 -- not a path-traversal vulnerability: name is hardcoded by the platform install flow (curated list of known template paths), not user-supplied. CLI runs as the operator on their own machine; threat model has no untrusted source for this argument.
 	return os.WriteFile(dst, []byte(content), 0o644)
 }
 
