@@ -202,7 +202,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		model.FailStep(0, err.Error())
 		printProgress()
 		printStep(tui.IconFail, "detect framework: "+err.Error())
-		return fmt.Errorf("detecting framework in %s: %w\n\nhint: pass a path with `ezkeel up <repo-url>` or run from the project root", sourceDir, err)
+		return fmt.Errorf("detecting framework in %s: %w\n\nhint: pass a repo URL with `ezkeel up <repo-url>` or run from the project root", sourceDir, err)
 	}
 	if fr.Framework == detect.FrameworkUnknown {
 		model.FailStep(0, "unknown framework")
@@ -260,7 +260,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 			model.FailStep(1, err.Error())
 			printProgress()
 			printStep(tui.IconFail, "write dockerfile: "+err.Error())
-			return fmt.Errorf("writing Dockerfile.ezkeel to %s: %w\n\nhint: check that the directory is writable", sourceDir, err)
+			return fmt.Errorf("writing Dockerfile.ezkeel to %s: %w\n\nhint: check that the target directory is writable", dockerfilePath, err)
 		}
 		model.CompleteStep(1, "generated Dockerfile.ezkeel")
 		printStep(tui.IconDone, "generated Dockerfile.ezkeel")
