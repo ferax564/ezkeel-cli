@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -71,21 +72,42 @@ var serverAddCmd = &cobra.Command{
 			fmt.Printf("Server created: %s (ID: %d)\n", host, result.Server.ID)
 
 			// Wait for server to be running.
-			fmt.Print("Waiting for server to be ready...")
-			serverReady := false
+			fmt.Print("Waiting for server to boot...")
+			ipKnown := false
 			for i := 0; i < 30; i++ {
 				status, getErr := hc.GetServer(result.Server.ID)
 				if getErr == nil && status.Server.Status == "running" {
-					fmt.Println(" ready!")
-					serverReady = true
+					fmt.Println(" booted!")
+					ipKnown = true
 					break
 				}
 				time.Sleep(2 * time.Second)
 				fmt.Print(".")
 			}
-			if !serverReady {
+			if !ipKnown {
 				fmt.Println(" warning: server may not be ready yet, check Hetzner console")
 			}
+
+			// TCP-connect-only probe is sufficient on Hetzner: cloud-init
+			// opens port 22 ONLY after injecting authorized_keys, so a
+			// successful connect implies the auth path is up. If that
+			// invariant ever breaks, the downstream bootstrap.Run will
+			// surface a real auth/protocol error.
+			fmt.Print("Waiting for SSH...")
+			ctx := cmd.Context()
+			dialer := &net.Dialer{Timeout: 3 * time.Second}
+			tcpProbe := func() bool {
+				conn, derr := dialer.DialContext(ctx, "tcp", host+":22")
+				if derr != nil {
+					return false
+				}
+				_ = conn.Close()
+				return true
+			}
+			if werr := waitForSSH(tcpProbe, 60, 3*time.Second); werr != nil {
+				return fmt.Errorf("hetzner ssh wait: %w", werr)
+			}
+			fmt.Println(" reachable!")
 		}
 
 		if host == "" && sshAlias == "" {
@@ -317,6 +339,21 @@ func runnerForServer(srv *config.Server) bootstrap.Runner {
 // can drive it with a fake runner.
 func runBootstrap(ctx context.Context, runner bootstrap.Runner, opts bootstrap.Options) error {
 	return bootstrap.Run(ctx, runner, opts)
+}
+
+// waitForSSH polls probe up to maxAttempts times, sleeping delay
+// between attempts, returning nil on the first success. delay=0 is
+// useful for tests so they don't sleep.
+func waitForSSH(probe func() bool, maxAttempts int, delay time.Duration) error {
+	for i := 0; i < maxAttempts; i++ {
+		if probe() {
+			return nil
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+	}
+	return fmt.Errorf("ssh not ready after %d attempts", maxAttempts)
 }
 
 func init() {

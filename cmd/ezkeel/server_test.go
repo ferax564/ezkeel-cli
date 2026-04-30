@@ -7,6 +7,27 @@ import (
 	"github.com/ferax564/ezkeel-cli/pkg/bootstrap"
 )
 
+func TestWaitForSSHRetries(t *testing.T) {
+	calls := 0
+	probe := func() bool {
+		calls++
+		return calls >= 3
+	}
+	if err := waitForSSH(probe, 5, 0); err != nil {
+		t.Fatalf("waitForSSH: %v", err)
+	}
+	if calls != 3 {
+		t.Errorf("calls = %d, want 3", calls)
+	}
+}
+
+func TestWaitForSSHTimesOut(t *testing.T) {
+	probe := func() bool { return false }
+	if err := waitForSSH(probe, 3, 0); err == nil {
+		t.Fatalf("waitForSSH expected timeout error")
+	}
+}
+
 type recordingRunner struct{ cmds []string }
 
 func (r *recordingRunner) Run(_ context.Context, cmd string) ([]byte, error) {
