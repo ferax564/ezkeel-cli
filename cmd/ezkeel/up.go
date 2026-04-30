@@ -13,6 +13,7 @@ import (
 	"github.com/ferax564/ezkeel-cli/pkg/agent"
 	"github.com/ferax564/ezkeel-cli/internal/config"
 	"github.com/ferax564/ezkeel-cli/internal/detect"
+	"github.com/ferax564/ezkeel-cli/internal/spec"
 	"github.com/ferax564/ezkeel-cli/internal/tui"
 	"github.com/ferax564/ezkeel-cli/pkg/templates"
 	"github.com/spf13/cobra"
@@ -107,6 +108,34 @@ func resolveTemplateArg(slug string, args []string) ([]string, string, error) {
 		warning = fmt.Sprintf("warning: --template=%s overrides positional repo URL %q\n", slug, args[0])
 	}
 	return []string{tmpl.RepoURL}, warning, nil
+}
+
+// applySpec layers ezkeel.yaml overrides onto detected framework
+// settings. Empty-valued spec fields are left untouched so a partial
+// spec is additive rather than destructive. Returns true when at
+// least one field was overridden, so the caller can log a one-liner.
+func applySpec(fr *detect.FrameworkResult, s *spec.Spec) bool {
+	if s == nil || fr == nil {
+		return false
+	}
+	overridden := false
+	if s.Framework != "" {
+		fr.Framework = detect.Framework(s.Framework)
+		overridden = true
+	}
+	if s.Build != "" {
+		fr.Build = s.Build
+		overridden = true
+	}
+	if s.Start != "" {
+		fr.Start = s.Start
+		overridden = true
+	}
+	if s.Port != 0 {
+		fr.Port = s.Port
+		overridden = true
+	}
+	return overridden
 }
 
 func runUp(cmd *cobra.Command, args []string) error {
@@ -204,11 +233,27 @@ func runUp(cmd *cobra.Command, args []string) error {
 		printStep(tui.IconFail, "detect framework: "+err.Error())
 		return fmt.Errorf("detecting framework in %s: %w\n\nhint: pass a repo URL with `ezkeel up <repo-url>` or run from the project root", sourceDir, err)
 	}
+
+	// Layer in ezkeel.yaml overrides if present in the source dir.
+	// Placed before the FrameworkUnknown gate so an explicit framework
+	// override can rescue a directory the auto-detector cannot classify.
+	overridden := false
+	if specPath, ferr := spec.Find(sourceDir); ferr == nil {
+		loadedSpec, lerr := spec.Load(specPath)
+		if lerr != nil {
+			model.FailStep(0, lerr.Error())
+			printProgress()
+			printStep(tui.IconFail, "load ezkeel.yaml: "+lerr.Error())
+			return fmt.Errorf("loading %s: %w", specPath, lerr)
+		}
+		overridden = applySpec(fr, loadedSpec)
+	}
+
 	if fr.Framework == detect.FrameworkUnknown {
 		model.FailStep(0, "unknown framework")
 		printProgress()
 		printStep(tui.IconFail, "detect framework: unknown framework")
-		return fmt.Errorf("could not detect a supported framework in %s\n\nhint: drop a Dockerfile next to your code and run `ezkeel up` again — ezkeel will use it as-is.\nsupported frameworks: run `ezkeel up --help` or visit https://ezkeel.com/docs.html", sourceDir)
+		return fmt.Errorf("could not detect a supported framework in %s\n\nhint: drop a Dockerfile next to your code and run `ezkeel up` again, or declare framework: in an ezkeel.yaml at the repo root.\nsupported frameworks: run `ezkeel up --help` or visit https://ezkeel.com/docs.html", sourceDir)
 	}
 
 	dbResult := detect.DetectDatabase(sourceDir)
@@ -216,6 +261,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 	model.CompleteStep(0, fmt.Sprintf("detected %s", fr.Framework))
 	printProgress()
 	printStep(tui.IconDone, fmt.Sprintf("detected %s", fr.Framework))
+	if overridden {
+		printStep(tui.IconDone, "applied ezkeel.yaml overrides")
+	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	if dryRun {

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ferax564/ezkeel-cli/internal/detect"
+	"github.com/ferax564/ezkeel-cli/internal/spec"
 	"github.com/ferax564/ezkeel-cli/pkg/templates"
 )
 
@@ -99,6 +101,51 @@ func TestAppNameFromDir(t *testing.T) {
 	want := "my-cool-app"
 	if got != want {
 		t.Errorf("appNameFromDir(%q) = %q, want %q", "/home/user/projects/my-cool-app", got, want)
+	}
+}
+
+func TestApplySpecOverridesPort(t *testing.T) {
+	fr := &detect.FrameworkResult{
+		Framework:  detect.FrameworkExpress,
+		Build:      "npm ci",
+		Start:      "node server.js",
+		Port:       3000,
+		Dockerfile: "auto",
+	}
+	s := &spec.Spec{Name: "x", Port: 8080, Start: "node custom.js"}
+
+	if !applySpec(fr, s) {
+		t.Errorf("applySpec returned false despite overrides")
+	}
+
+	if fr.Port != 8080 {
+		t.Errorf("Port = %d, want 8080", fr.Port)
+	}
+	if fr.Start != "node custom.js" {
+		t.Errorf("Start = %q, want override", fr.Start)
+	}
+	if fr.Build != "npm ci" {
+		t.Errorf("Build = %q, want untouched", fr.Build)
+	}
+}
+
+func TestApplySpecNilNoop(t *testing.T) {
+	fr := &detect.FrameworkResult{Framework: detect.FrameworkExpress, Port: 3000}
+	if applySpec(fr, nil) {
+		t.Errorf("applySpec(nil) returned true")
+	}
+	if fr.Port != 3000 {
+		t.Errorf("Port mutated to %d", fr.Port)
+	}
+}
+
+func TestApplySpec_ReportsOverridden(t *testing.T) {
+	fr := &detect.FrameworkResult{Framework: detect.FrameworkExpress, Port: 3000}
+	if applySpec(fr, &spec.Spec{Name: "x"}) {
+		t.Errorf("applySpec returned true for empty-override spec")
+	}
+	if !applySpec(fr, &spec.Spec{Name: "x", Port: 8080}) {
+		t.Errorf("applySpec returned false despite Port override")
 	}
 }
 
