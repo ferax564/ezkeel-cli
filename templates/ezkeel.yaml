@@ -1,0 +1,29 @@
+# spec: ezkeel/v1
+#
+# ezkeel.yaml — declarative deploy spec, read by `ezkeel up`.
+# Every field except `name` is optional. When omitted, ezkeel auto-detects.
+# Spec docs: https://ezkeel.com/spec.html
+
+name: {{PROJECT_NAME}}
+
+# framework: nodejs|python|go|rust|... (auto-detected if absent)
+# build:   "npm ci && npm run build"
+# start:   "node server.js"
+# port:    3000
+
+services:
+  db:
+    engine: postgres
+    version: "16"
+
+# runtime: docker (default) or sysbox (kernel-isolated)
+runtime: docker
+sandbox: false
+
+env:
+  - DATABASE_URL
+  - NODE_ENV
+
+resources:
+  memory: "512m"
+  cpus: "1.0"
