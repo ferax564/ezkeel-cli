@@ -1,8 +1,28 @@
 package main
 
 import (
+	"context"
 	"testing"
+
+	"github.com/ferax564/ezkeel-cli/pkg/bootstrap"
 )
+
+type recordingRunner struct{ cmds []string }
+
+func (r *recordingRunner) Run(_ context.Context, cmd string) ([]byte, error) {
+	r.cmds = append(r.cmds, cmd)
+	return nil, nil
+}
+
+func TestRunBootstrapInvokesPackage(t *testing.T) {
+	rec := &recordingRunner{}
+	if err := runBootstrap(context.Background(), rec, bootstrap.Options{AgentURL: "https://example/agent"}); err != nil {
+		t.Fatalf("runBootstrap: %v", err)
+	}
+	if len(rec.cmds) < 3 {
+		t.Fatalf("calls = %d, want >=3", len(rec.cmds))
+	}
+}
 
 func TestServerNameFromHost(t *testing.T) {
 	tests := []struct {
