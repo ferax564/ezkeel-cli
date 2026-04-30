@@ -128,6 +128,7 @@ func scaffoldProject(projectDir, projectName string) error {
 	// Files to scaffold: map of relative path → template name
 	files := map[string]string{
 		"workspace.yaml":                  "workspace.yaml",
+		"ezkeel.yaml":                     "ezkeel.yaml",
 		"CLAUDE.md":                       "CLAUDE.md",
 		"AGENTS.md":                       "AGENTS.md",
 		".devcontainer/devcontainer.json": "devcontainer.json",
@@ -177,6 +178,10 @@ func readTemplate(name string) string {
 // defaultTemplate returns a minimal inline template when the file isn't found.
 func defaultTemplate(name string) string {
 	switch name {
+	case "ezkeel.yaml":
+		return `# spec: ezkeel/v1
+name: {{PROJECT_NAME}}
+`
 	case "workspace.yaml":
 		return `name: {{PROJECT_NAME}}
 version: "1.0"
