@@ -114,13 +114,37 @@ func resolveTemplateArg(slug string, args []string) ([]string, string, error) {
 // settings. Empty-valued spec fields are left untouched so a partial
 // spec is additive rather than destructive. Returns true when at
 // least one field was overridden, so the caller can log a one-liner.
+//
+// When the spec declares a framework that auto-detect didn't already
+// match, canonical Build/Start/Port defaults are filled in from
+// detect.DefaultsFor first so a framework-only spec produces a
+// runnable Dockerfile. Explicit spec fields below override those
+// defaults, and any non-zero value already on `fr` (from a successful
+// auto-detect) is preserved.
 func applySpec(fr *detect.FrameworkResult, s *spec.Spec) bool {
 	if s == nil || fr == nil {
 		return false
 	}
 	overridden := false
 	if s.Framework != "" {
-		fr.Framework = detect.Framework(s.Framework)
+		fwk := detect.Framework(s.Framework)
+		// Fill blanks from the canonical defaults table. We only fill
+		// fields that are still zero — when the spec rescues a
+		// FrameworkUnknown all three (Build/Start/Port) are blank, and
+		// when it's "augmenting" a successful detect they are already
+		// populated and shouldn't be clobbered.
+		if defaults, ok := detect.DefaultsFor(fwk); ok {
+			if fr.Build == "" {
+				fr.Build = defaults.Build
+			}
+			if fr.Start == "" {
+				fr.Start = defaults.Start
+			}
+			if fr.Port == 0 {
+				fr.Port = defaults.Port
+			}
+		}
+		fr.Framework = fwk
 		// If auto-detect couldn't classify the dir it left Dockerfile
 		// empty. The spec just rescued the framework — make sure the
 		// later "auto" Dockerfile-generation path actually runs instead
@@ -151,12 +175,19 @@ func applySpec(fr *detect.FrameworkResult, s *spec.Spec) bool {
 // engine is explicitly declared so a repo without an importable client
 // dependency (e.g. a Rust app speaking raw libpq) still triggers
 // Postgres provisioning when the spec asks for it.
+//
+// services.db.version is carried through to DatabaseResult.Version;
+// the deploy step substitutes its own default (Postgres 16) when the
+// spec leaves it blank.
 func applyServicesFromSpec(detected *detect.DatabaseResult, s *spec.Spec) *detect.DatabaseResult {
 	if s == nil {
 		return detected
 	}
 	if svc, ok := s.Services["db"]; ok && svc.Engine != "" {
-		return &detect.DatabaseResult{Engine: detect.DBEngine(svc.Engine)}
+		return &detect.DatabaseResult{
+			Engine:  detect.DBEngine(svc.Engine),
+			Version: svc.Version,
+		}
 	}
 	return detected
 }
@@ -414,11 +445,17 @@ func runUp(cmd *cobra.Command, args []string) error {
 		printStep(tui.IconActive, "provisioning PostgreSQL...")
 		dbPass := generateDBPassword()
 		dbName := appNameToDBName(appName)
+		// Spec-declared services.db.version wins; otherwise default to
+		// Postgres 16 (the historical hardcoded value).
+		dbVersion := dbResult.Version
+		if dbVersion == "" {
+			dbVersion = "16"
+		}
 		dbResp, dbErr := client.Send(ctx, &agent.Request{
 			Type: agent.CmdDBCreate,
 			DBCreate: &agent.DBCreateRequest{
 				Engine:   string(dbResult.Engine),
-				Version:  "16",
+				Version:  dbVersion,
 				Database: dbName,
 				User:     dbName,
 				Password: dbPass,

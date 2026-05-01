@@ -17,12 +17,17 @@ const DefaultAgentURL = "https://github.com/ferax564/ezkeel-cli/releases/latest/
 // minimalCaddyfile is the deploy-target Caddyfile. Empty of routes by
 // design — `ezkeel up <repo>` later writes per-app reverse_proxy entries
 // via cmd/ezkeel/server.go's addCaddyRoute().
+//
+// Crucially this MUST NOT disable the admin API. After appending a
+// per-app reverse_proxy block, cmd/ezkeel/server.go runs
+// `docker exec ezkeel-caddy-1 caddy reload --config /etc/caddy/Caddyfile`,
+// which talks to the in-container admin endpoint (default
+// localhost:2019). With `admin off`, reload silently fails and the
+// freshly-routed app would 404 on its public domain. Caddy's default
+// admin only listens inside the container, so leaving it on does not
+// expose anything to the public network.
 const minimalCaddyfile = `# Managed by ezkeel server add. Per-app routes are
 # appended below by ezkeel up.
-
-{
-    admin off
-}
 `
 
 // minimalCaddyCompose runs Caddy on the external ezkeel-apps network with

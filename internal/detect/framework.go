@@ -300,3 +300,49 @@ func detectRails(dir string) (*FrameworkResult, bool) {
 func containsWord(text, word string) bool {
 	return strings.Contains(strings.ToLower(text), strings.ToLower(word))
 }
+
+// DefaultsFor returns the canonical Build/Start/Port for the given
+// framework as a *FrameworkResult with Dockerfile set to "auto".
+// Returns (nil, false) for FrameworkUnknown, FrameworkDockerfile, and
+// any framework not in the table.
+//
+// The values mirror what DetectFramework returns when it positively
+// identifies a framework. Used by spec-rescue paths in `ezkeel up`
+// where the user declared `framework:` in ezkeel.yaml without
+// specifying Build/Start/Port — without these defaults the generated
+// Dockerfile would emit `EXPOSE 0` and an empty `CMD []`.
+func DefaultsFor(framework Framework) (*FrameworkResult, bool) {
+	switch framework {
+	case FrameworkGo:
+		return &FrameworkResult{Framework: framework, Build: "go build ./...", Start: "./app", Port: 8080, Dockerfile: "auto"}, true
+	case FrameworkRust:
+		return &FrameworkResult{Framework: framework, Build: "cargo build --release", Start: "./target/release/app", Port: 8080, Dockerfile: "auto"}, true
+	case FrameworkStatic:
+		return &FrameworkResult{Framework: framework, Port: 80, Dockerfile: "auto"}, true
+	case FrameworkNextjs:
+		return &FrameworkResult{Framework: framework, Build: "npm run build", Start: "node .next/standalone/server.js", Port: 3000, Dockerfile: "auto"}, true
+	case FrameworkRemix:
+		return &FrameworkResult{Framework: framework, Build: "npm run build", Start: "node ./build/server/index.js", Port: 3000, Dockerfile: "auto"}, true
+	case FrameworkNuxt:
+		return &FrameworkResult{Framework: framework, Build: "npm run build", Start: "node .output/server/index.mjs", Port: 3000, Dockerfile: "auto"}, true
+	case FrameworkAstro:
+		return &FrameworkResult{Framework: framework, Build: "npm run build", Start: "node ./dist/server/entry.mjs", Port: 4321, Dockerfile: "auto"}, true
+	case FrameworkVite:
+		return &FrameworkResult{Framework: framework, Build: "npm run build", Start: "npx serve dist", Port: 5173, Dockerfile: "auto"}, true
+	case FrameworkExpress:
+		return &FrameworkResult{Framework: framework, Start: "node index.js", Port: 3000, Dockerfile: "auto"}, true
+	case FrameworkHono:
+		return &FrameworkResult{Framework: framework, Build: "npm run build", Start: "node dist/index.js", Port: 3000, Dockerfile: "auto"}, true
+	case FrameworkFastify:
+		return &FrameworkResult{Framework: framework, Start: "node index.js", Port: 3000, Dockerfile: "auto"}, true
+	case FrameworkFastAPI:
+		return &FrameworkResult{Framework: framework, Start: "uvicorn main:app --host 0.0.0.0 --port 8000", Port: 8000, Dockerfile: "auto"}, true
+	case FrameworkDjango:
+		return &FrameworkResult{Framework: framework, Build: "python manage.py collectstatic --noinput", Start: "python manage.py runserver 0.0.0.0:8000", Port: 8000, Dockerfile: "auto"}, true
+	case FrameworkFlask:
+		return &FrameworkResult{Framework: framework, Start: "flask run --host=0.0.0.0 --port=5000", Port: 5000, Dockerfile: "auto"}, true
+	case FrameworkRails:
+		return &FrameworkResult{Framework: framework, Build: "bundle exec rake assets:precompile", Start: "bundle exec rails server -b 0.0.0.0 -p 3000", Port: 3000, Dockerfile: "auto"}, true
+	}
+	return nil, false
+}

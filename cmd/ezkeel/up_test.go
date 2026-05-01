@@ -170,6 +170,64 @@ func TestApplySpec_PreservesExistingDockerfile(t *testing.T) {
 	}
 }
 
+func TestApplySpec_FrameworkOnlyFillsDefaults(t *testing.T) {
+	// When auto-detect returned FrameworkUnknown and the spec rescues
+	// with `framework: rust` only, applySpec must populate Build/Start/
+	// Port from the canonical defaults — otherwise the generated
+	// Dockerfile emits EXPOSE 0 / CMD [].
+	fr := &detect.FrameworkResult{Framework: detect.FrameworkUnknown}
+	if !applySpec(fr, &spec.Spec{Name: "x", Framework: "rust"}) {
+		t.Errorf("applySpec returned false despite framework override")
+	}
+	if fr.Build != "cargo build --release" {
+		t.Errorf("Build = %q, want cargo build --release", fr.Build)
+	}
+	if fr.Start != "./target/release/app" {
+		t.Errorf("Start = %q, want ./target/release/app", fr.Start)
+	}
+	if fr.Port != 8080 {
+		t.Errorf("Port = %d, want 8080", fr.Port)
+	}
+	if fr.Dockerfile != "auto" {
+		t.Errorf("Dockerfile = %q, want auto", fr.Dockerfile)
+	}
+}
+
+func TestApplySpec_ExplicitOverridesDefaults(t *testing.T) {
+	// Explicit spec values must beat the framework-defaults table.
+	fr := &detect.FrameworkResult{Framework: detect.FrameworkUnknown}
+	applySpec(fr, &spec.Spec{Name: "x", Framework: "rust", Port: 9999})
+	if fr.Port != 9999 {
+		t.Errorf("Port = %d, want 9999 (explicit override)", fr.Port)
+	}
+	// Start was not explicitly set, so the default carries through.
+	if fr.Start != "./target/release/app" {
+		t.Errorf("Start = %q, want default carry-over", fr.Start)
+	}
+}
+
+func TestApplySpec_FrameworkAugmentPreservesDetectedFields(t *testing.T) {
+	// If auto-detect populated fields and the spec just restates the
+	// framework, applySpec must NOT clobber the detected Build/Start/
+	// Port from the defaults table.
+	fr := &detect.FrameworkResult{
+		Framework: detect.FrameworkExpress,
+		Build:     "npm ci && npm run build",
+		Start:     "node ./dist/main.js",
+		Port:      4000,
+	}
+	applySpec(fr, &spec.Spec{Name: "x", Framework: "express"})
+	if fr.Build != "npm ci && npm run build" {
+		t.Errorf("Build clobbered: %q", fr.Build)
+	}
+	if fr.Start != "node ./dist/main.js" {
+		t.Errorf("Start clobbered: %q", fr.Start)
+	}
+	if fr.Port != 4000 {
+		t.Errorf("Port clobbered: %d", fr.Port)
+	}
+}
+
 func TestApplyServicesFromSpec_OverridesDetect(t *testing.T) {
 	detected := &detect.DatabaseResult{Engine: detect.DBNone}
 	got := applyServicesFromSpec(detected, &spec.Spec{
@@ -178,6 +236,22 @@ func TestApplyServicesFromSpec_OverridesDetect(t *testing.T) {
 	})
 	if got.Engine != detect.DBPostgres {
 		t.Errorf("Engine = %q, want postgres", got.Engine)
+	}
+}
+
+func TestApplyServicesFromSpec_CarriesVersion(t *testing.T) {
+	// Spec-declared Postgres 15 must thread through DBCreateRequest;
+	// otherwise the deploy step always provisions PG 16 regardless.
+	detected := &detect.DatabaseResult{Engine: detect.DBNone}
+	got := applyServicesFromSpec(detected, &spec.Spec{
+		Name:     "x",
+		Services: map[string]spec.Service{"db": {Engine: "postgres", Version: "15"}},
+	})
+	if got.Engine != detect.DBPostgres {
+		t.Errorf("Engine = %q, want postgres", got.Engine)
+	}
+	if got.Version != "15" {
+		t.Errorf("Version = %q, want 15", got.Version)
 	}
 }
 

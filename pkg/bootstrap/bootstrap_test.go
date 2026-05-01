@@ -215,6 +215,16 @@ func TestStepsExposed(t *testing.T) {
 	}
 }
 
+func TestMinimalCaddyfileAllowsAdminReload(t *testing.T) {
+	// `docker exec ezkeel-caddy-1 caddy reload --config /etc/caddy/Caddyfile`
+	// (cmd/ezkeel/server.go) talks to Caddy's admin endpoint. If the
+	// Caddyfile disables admin, reload silently fails and freshly-added
+	// per-app routes never load — the public domain 404s.
+	if strings.Contains(minimalCaddyfile, "admin off") {
+		t.Fatalf("minimalCaddyfile must not disable admin API; caddy reload depends on it")
+	}
+}
+
 func TestRunCaddyUpFails(t *testing.T) {
 	r := &fakeRunner{
 		resp: func(i int, cmd string) ([]byte, error) {

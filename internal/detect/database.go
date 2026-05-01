@@ -33,6 +33,11 @@ type DatabaseResult struct {
 	Engine     DBEngine
 	Migrator   Migrator
 	MigrateCmd string // e.g. "npx prisma migrate deploy"
+	// Version is the engine version requested by ezkeel.yaml's
+	// services.db.version. Empty means "use the deploy-step default"
+	// (currently Postgres 16). Auto-detect never sets this — only
+	// the spec layer does.
+	Version string
 }
 
 // DetectDatabase scans dir and returns the best-matched DatabaseResult.
