@@ -275,10 +275,13 @@ func TestApplySpec_SwitchWithExplicitStartUsesExplicit(t *testing.T) {
 
 func TestApplyServicesFromSpec_OverridesDetect(t *testing.T) {
 	detected := &detect.DatabaseResult{Engine: detect.DBNone}
-	got := applyServicesFromSpec(detected, &spec.Spec{
+	got, err := applyServicesFromSpec(detected, &spec.Spec{
 		Name:     "x",
 		Services: map[string]spec.Service{"db": {Engine: "postgres"}},
 	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
 	if got.Engine != detect.DBPostgres {
 		t.Errorf("Engine = %q, want postgres", got.Engine)
 	}
@@ -288,10 +291,13 @@ func TestApplyServicesFromSpec_CarriesVersion(t *testing.T) {
 	// Spec-declared Postgres 15 must thread through DBCreateRequest;
 	// otherwise the deploy step always provisions PG 16 regardless.
 	detected := &detect.DatabaseResult{Engine: detect.DBNone}
-	got := applyServicesFromSpec(detected, &spec.Spec{
+	got, err := applyServicesFromSpec(detected, &spec.Spec{
 		Name:     "x",
 		Services: map[string]spec.Service{"db": {Engine: "postgres", Version: "15"}},
 	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
 	if got.Engine != detect.DBPostgres {
 		t.Errorf("Engine = %q, want postgres", got.Engine)
 	}
@@ -302,9 +308,78 @@ func TestApplyServicesFromSpec_CarriesVersion(t *testing.T) {
 
 func TestApplyServicesFromSpec_NilSpecNoop(t *testing.T) {
 	detected := &detect.DatabaseResult{Engine: detect.DBPostgres}
-	got := applyServicesFromSpec(detected, nil)
+	got, err := applyServicesFromSpec(detected, nil)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
 	if got != detected {
 		t.Errorf("expected unchanged pointer for nil spec")
+	}
+}
+
+func TestNormalizeDBEngine_Aliases(t *testing.T) {
+	cases := []struct {
+		in   string
+		want detect.DBEngine
+	}{
+		{"postgres", detect.DBPostgres},
+		{"postgresql", detect.DBPostgres},
+		{"PostgreSQL", detect.DBPostgres},
+		{"pg", detect.DBPostgres},
+		{"mysql", detect.DBMySQL},
+		{"mariadb", detect.DBMySQL},
+	}
+	for _, c := range cases {
+		got, err := normalizeDBEngine(c.in)
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%q: got %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestNormalizeDBEngine_Rejects(t *testing.T) {
+	rejected := []string{"sqlite", "mongodb", "oracle", "", "redis"}
+	for _, in := range rejected {
+		if _, err := normalizeDBEngine(in); err == nil {
+			t.Errorf("%q: expected error, got nil", in)
+		}
+	}
+}
+
+func TestApplyServicesFromSpec_Postgresql(t *testing.T) {
+	// `postgresql` (with the trailing -ql) is a common alias from
+	// people who type the full name. Without normalization the cast
+	// to detect.DBEngine yields "postgresql", which never matches
+	// DBPostgres == "postgres" — DB provisioning silently skips and
+	// the app starts without DATABASE_URL.
+	detected := &detect.DatabaseResult{Engine: detect.DBNone}
+	got, err := applyServicesFromSpec(detected, &spec.Spec{
+		Name:     "x",
+		Services: map[string]spec.Service{"db": {Engine: "postgresql"}},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got.Engine != detect.DBPostgres {
+		t.Errorf("Engine = %q, want postgres (alias normalized)", got.Engine)
+	}
+}
+
+func TestApplyServicesFromSpec_RejectsUnknown(t *testing.T) {
+	detected := &detect.DatabaseResult{Engine: detect.DBPostgres}
+	_, err := applyServicesFromSpec(detected, &spec.Spec{
+		Name:     "x",
+		Services: map[string]spec.Service{"db": {Engine: "sqlite"}},
+	})
+	if err == nil {
+		t.Fatalf("expected error for unsupported engine")
+	}
+	if !strings.Contains(err.Error(), "sqlite") {
+		t.Errorf("error should name the unsupported engine: %v", err)
 	}
 }
 

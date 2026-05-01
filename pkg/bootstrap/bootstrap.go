@@ -118,9 +118,17 @@ func caddyfileWriteCmd() string {
 // hand-edited compose customisations intact. `docker compose up -d`
 // downstream is idempotent either way; this guard avoids surprising
 // the user when they have tweaked the file.
+//
+// Also guarded against /opt/ezkeel/docker-compose.yml — that filename is
+// owned by `ezkeel platform install` (the full Forgejo+Infisical+Caddy
+// stack). On a host that has the platform installed, writing a separate
+// compose.yml here AND running `docker compose up -d` would spin up a
+// second minimal Caddy alongside the platform's, racing for ports 80/443
+// and taking production routes down. If docker-compose.yml exists, we
+// skip the write entirely; the caddy_up step does the same.
 func caddyComposeWriteCmd() string {
 	return fmt.Sprintf(
-		"test -f /opt/ezkeel/compose.yml || cat > /opt/ezkeel/compose.yml <<'EZKEELEOF'\n%sEZKEELEOF",
+		"test -f /opt/ezkeel/compose.yml || test -f /opt/ezkeel/docker-compose.yml || cat > /opt/ezkeel/compose.yml <<'EZKEELEOF'\n%sEZKEELEOF",
 		minimalCaddyCompose,
 	)
 }
@@ -133,7 +141,7 @@ func caddyComposeWriteCmd() string {
 func Steps(opts Options) []Step {
 	url := opts.agentURL()
 	return []Step{
-		{Name: "docker_probe", Cmd: "docker --version"},
+		{Name: "docker_probe", Cmd: "docker --version && docker compose version"},
 		{Name: "docker_install", Cmd: "curl -fsSL https://get.docker.com | sh"},
 		{Name: "agent_download", Cmd: fmt.Sprintf(
 			"curl -fsSL -o /usr/local/bin/ezkeel-agent %s && chmod +x /usr/local/bin/ezkeel-agent",
@@ -144,7 +152,7 @@ func Steps(opts Options) []Step {
 		{Name: "platform_dir", Cmd: "mkdir -p /opt/ezkeel"},
 		{Name: "caddyfile_write", Cmd: caddyfileWriteCmd()},
 		{Name: "caddy_compose_write", Cmd: caddyComposeWriteCmd()},
-		{Name: "caddy_up", Cmd: "cd /opt/ezkeel && docker compose -p ezkeel up -d"},
+		{Name: "caddy_up", Cmd: "test -f /opt/ezkeel/docker-compose.yml || (cd /opt/ezkeel && docker compose -p ezkeel up -d)"},
 	}
 }
 

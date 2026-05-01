@@ -258,20 +258,45 @@ func resolveResources(memFlag, cpuFlag string, s *spec.Spec) (mem, cpu string) {
 // dependency (e.g. a Rust app speaking raw libpq) still triggers
 // Postgres provisioning when the spec asks for it.
 //
+// Engine aliases (postgresql→postgres, mariadb→mysql, …) are normalized
+// to the canonical detect.DBEngine constants so a typo or natural-language
+// alias does not silently bypass DB provisioning. Unknown engines return
+// an error so the caller can surface it loudly instead of letting the
+// deploy step skip the entire database step.
+//
 // services.db.version is carried through to DatabaseResult.Version;
 // the deploy step substitutes its own default (Postgres 16) when the
 // spec leaves it blank.
-func applyServicesFromSpec(detected *detect.DatabaseResult, s *spec.Spec) *detect.DatabaseResult {
+func applyServicesFromSpec(detected *detect.DatabaseResult, s *spec.Spec) (*detect.DatabaseResult, error) {
 	if s == nil {
-		return detected
+		return detected, nil
 	}
-	if svc, ok := s.Services["db"]; ok && svc.Engine != "" {
-		return &detect.DatabaseResult{
-			Engine:  detect.DBEngine(svc.Engine),
-			Version: svc.Version,
-		}
+	svc, ok := s.Services["db"]
+	if !ok || svc.Engine == "" {
+		return detected, nil
 	}
-	return detected
+	engine, err := normalizeDBEngine(svc.Engine)
+	if err != nil {
+		return nil, err
+	}
+	return &detect.DatabaseResult{Engine: engine, Version: svc.Version}, nil
+}
+
+// normalizeDBEngine maps common aliases (postgresql, pg, mariadb) to the
+// canonical detect.DBEngine constants and rejects unsupported values.
+//
+// The cast `detect.DBEngine(raw)` would silently accept anything — and
+// then the deploy step's `switch` on DBPostgres / DBMySQL would fall
+// through, skipping DB provisioning AND DATABASE_URL injection. Spec
+// promised Postgres, container starts with no DB. Reject loudly.
+func normalizeDBEngine(raw string) (detect.DBEngine, error) {
+	switch strings.ToLower(raw) {
+	case "postgres", "postgresql", "pg":
+		return detect.DBPostgres, nil
+	case "mysql", "mariadb":
+		return detect.DBMySQL, nil
+	}
+	return "", fmt.Errorf("unsupported services.db.engine %q (supported: postgres, mysql)", raw)
 }
 
 func runUp(cmd *cobra.Command, args []string) error {
@@ -397,7 +422,13 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	dbResult := detect.DetectDatabase(sourceDir)
-	dbResult = applyServicesFromSpec(dbResult, loadedSpec)
+	dbResult, err = applyServicesFromSpec(dbResult, loadedSpec)
+	if err != nil {
+		model.FailStep(0, err.Error())
+		printProgress()
+		printStep(tui.IconFail, "ezkeel.yaml services: "+err.Error())
+		return fmt.Errorf("ezkeel.yaml: %w", err)
+	}
 
 	model.CompleteStep(0, fmt.Sprintf("detected %s", fr.Framework))
 	printProgress()

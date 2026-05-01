@@ -283,11 +283,69 @@ func TestStepsExposed_AgentDownloadIsQuoted(t *testing.T) {
 	}
 }
 
+func TestCaddyComposeWriteSkipsForPlatformInstall(t *testing.T) {
+	// `ezkeel platform install` writes /opt/ezkeel/docker-compose.yml
+	// (note the hyphen). On a host that has the full platform stack
+	// installed, re-running `ezkeel server add` would otherwise write
+	// our minimal compose.yml alongside it and `docker compose up -d`
+	// would spin up a second Caddy that races for ports 80/443.
+	cmd := caddyComposeWriteCmd()
+	if !strings.Contains(cmd, "test -f /opt/ezkeel/docker-compose.yml") {
+		t.Errorf("compose write must also guard docker-compose.yml (platform install path); got: %q", cmd)
+	}
+}
+
+func TestCaddyUpStepSkipsForPlatformInstall(t *testing.T) {
+	// Even if the compose write skipped (because docker-compose.yml
+	// already exists), running `docker compose -p ezkeel up -d` here
+	// would still bring up a minimal stack from a (now-empty) project
+	// dir or interact with the platform's compose. Skip the up entirely
+	// when the platform owns this directory.
+	steps := Steps(Options{AgentURL: "https://example/agent"})
+	var caddyUp Step
+	for _, s := range steps {
+		if s.Name == "caddy_up" {
+			caddyUp = s
+			break
+		}
+	}
+	if caddyUp.Cmd == "" {
+		t.Fatal("caddy_up step missing from Steps()")
+	}
+	if !strings.Contains(caddyUp.Cmd, "test -f /opt/ezkeel/docker-compose.yml") {
+		t.Errorf("caddy_up step must skip when platform install owns compose; got: %q", caddyUp.Cmd)
+	}
+}
+
+func TestStepsExposed_DockerProbeIncludesCompose(t *testing.T) {
+	// Some Debian/Ubuntu LTS combos ship distro Docker without the
+	// v2 compose plugin. If docker_probe only checked `docker --version`,
+	// install would be skipped and bootstrap would later fail at
+	// caddy_up. The get.docker.com install script bundles the v2
+	// plugin, so triggering install on a missing plugin recovers.
+	steps := Steps(Options{AgentURL: "https://example/agent"})
+	var probe Step
+	for _, s := range steps {
+		if s.Name == "docker_probe" {
+			probe = s
+			break
+		}
+	}
+	if probe.Cmd == "" {
+		t.Fatal("docker_probe step missing from Steps()")
+	}
+	if !strings.Contains(probe.Cmd, "docker compose version") {
+		t.Errorf("docker_probe must check the v2 compose plugin too; got: %q", probe.Cmd)
+	}
+}
+
 func TestRunCaddyUpFails(t *testing.T) {
 	r := &fakeRunner{
 		resp: func(i int, cmd string) ([]byte, error) {
-			// Last step (caddy_up) fails.
-			if strings.HasPrefix(cmd, "cd /opt/ezkeel && docker compose") {
+			// Last step (caddy_up) fails. The step is wrapped in a
+			// `test -f docker-compose.yml || (...)` guard so match on
+			// the docker-compose substring inside the parens.
+			if strings.Contains(cmd, "docker compose -p ezkeel up -d") {
 				return []byte("compose error"), errors.New("exit 1")
 			}
 			return nil, nil
