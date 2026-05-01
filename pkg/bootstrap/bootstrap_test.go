@@ -356,3 +356,40 @@ func TestRunCaddyUpFails(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// TestPrivilegedStepsUseSudo guards the non-root bootstrap path. Cloud
+// images (AWS, Vultr, Scaleway) default to a non-root user with
+// passwordless sudo; without `sudo -n` on the privileged steps, every
+// bootstrap on those providers would fail at the first /etc or /opt
+// write. Read-only steps (docker_probe, agent_verify) deliberately
+// avoid sudo — covered separately by TestReadOnlyStepsAvoidSudo.
+func TestPrivilegedStepsUseSudo(t *testing.T) {
+	steps := Steps(Options{AgentURL: "https://example/agent"})
+	privileged := []string{
+		"docker_install", "agent_download", "ezkeel_apps_network",
+		"platform_dir", "caddyfile_write", "caddy_compose_write", "caddy_up",
+	}
+	privSet := make(map[string]bool, len(privileged))
+	for _, n := range privileged {
+		privSet[n] = true
+	}
+	for _, s := range steps {
+		if privSet[s.Name] && !strings.Contains(s.Cmd, "sudo -n") {
+			t.Errorf("step %q is privileged but command lacks `sudo -n`: %q", s.Name, s.Cmd)
+		}
+	}
+}
+
+// TestReadOnlyStepsAvoidSudo confirms docker_probe and agent_verify do
+// not invoke sudo. They only read state; gating them behind sudo would
+// reject installs on hosts that have NOPASSWD entries scoped only to
+// docker/curl (a common ops practice on shared multi-tenant boxes).
+func TestReadOnlyStepsAvoidSudo(t *testing.T) {
+	steps := Steps(Options{AgentURL: "https://example/agent"})
+	readOnly := map[string]bool{"docker_probe": true, "agent_verify": true}
+	for _, s := range steps {
+		if readOnly[s.Name] && strings.Contains(s.Cmd, "sudo") {
+			t.Errorf("read-only step %q should not invoke sudo: %q", s.Name, s.Cmd)
+		}
+	}
+}

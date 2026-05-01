@@ -104,9 +104,16 @@ func shellQuote(s string) string {
 // appended after the initial bootstrap. With `--bootstrap` default-on
 // this is a hard requirement: an unconditional cat would wipe every
 // running app's route on the next reload.
+//
+// Uses `sudo -n tee` rather than `cat >` so a non-root SSH user
+// (ubuntu/debian on AWS/Vultr/Scaleway) with passwordless sudo can
+// write into root-owned /opt/ezkeel. The leading `test -f` guards
+// short-circuit before sudo runs on already-bootstrapped hosts, so
+// subsequent runs never invoke sudo at all. As root, `sudo -n` is a
+// no-op.
 func caddyfileWriteCmd() string {
 	return fmt.Sprintf(
-		"test -f /opt/ezkeel/Caddyfile || cat > /opt/ezkeel/Caddyfile <<'EZKEELEOF'\n%sEZKEELEOF",
+		"test -f /opt/ezkeel/Caddyfile || test -f /opt/ezkeel/docker-compose.yml || sudo -n tee /opt/ezkeel/Caddyfile >/dev/null <<'EZKEELEOF'\n%sEZKEELEOF",
 		minimalCaddyfile,
 	)
 }
@@ -126,9 +133,14 @@ func caddyfileWriteCmd() string {
 // second minimal Caddy alongside the platform's, racing for ports 80/443
 // and taking production routes down. If docker-compose.yml exists, we
 // skip the write entirely; the caddy_up step does the same.
+//
+// Uses `sudo -n tee` rather than `cat >` so non-root SSH users with
+// passwordless sudo can write into root-owned /opt/ezkeel. The
+// `test -f` guards short-circuit before sudo runs on already-set-up
+// hosts. As root, `sudo -n` is a no-op.
 func caddyComposeWriteCmd() string {
 	return fmt.Sprintf(
-		"test -f /opt/ezkeel/compose.yml || test -f /opt/ezkeel/docker-compose.yml || cat > /opt/ezkeel/compose.yml <<'EZKEELEOF'\n%sEZKEELEOF",
+		"test -f /opt/ezkeel/compose.yml || test -f /opt/ezkeel/docker-compose.yml || sudo -n tee /opt/ezkeel/compose.yml >/dev/null <<'EZKEELEOF'\n%sEZKEELEOF",
 		minimalCaddyCompose,
 	)
 }
@@ -138,21 +150,47 @@ func caddyComposeWriteCmd() string {
 // when docker_probe succeeds. Steps after agent_verify install a
 // minimal Caddy compose stack so cmd/ezkeel/server.go's network-connect
 // step has a target on a truly fresh box.
+//
+// Privileged steps prefix `sudo -n` so a non-root SSH user
+// (ubuntu/debian on AWS/Vultr/Scaleway) with passwordless sudo can run
+// the full bootstrap. As root, `sudo -n` is a no-op. On a non-root
+// host WITHOUT passwordless sudo, the step fails fast with a clear
+// "sudo: a password is required" instead of silently mis-installing.
+// Read-only steps (docker_probe, agent_verify) deliberately omit sudo.
 func Steps(opts Options) []Step {
 	url := opts.agentURL()
 	return []Step{
+		// Read-only — no sudo needed.
 		{Name: "docker_probe", Cmd: "docker --version && docker compose version"},
-		{Name: "docker_install", Cmd: "curl -fsSL https://get.docker.com | sh"},
+
+		// Privileged — install script writes to /etc, /usr/local, etc.
+		// curl runs as the SSH user; only the shell that writes files
+		// and starts dockerd needs root, so sudo wraps `sh` not `curl`.
+		{Name: "docker_install", Cmd: "curl -fsSL https://get.docker.com | sudo -n sh"},
+
+		// Privileged — write to /usr/local/bin and chmod.
 		{Name: "agent_download", Cmd: fmt.Sprintf(
-			"curl -fsSL -o /usr/local/bin/ezkeel-agent %s && chmod +x /usr/local/bin/ezkeel-agent",
+			"sudo -n curl -fsSL -o /usr/local/bin/ezkeel-agent %s && sudo -n chmod +x /usr/local/bin/ezkeel-agent",
 			shellQuote(url),
 		)},
+
+		// Read-only — agent binary is on PATH after the previous step.
 		{Name: "agent_verify", Cmd: "ezkeel-agent --version"},
-		{Name: "ezkeel_apps_network", Cmd: "docker network inspect ezkeel-apps >/dev/null 2>&1 || docker network create ezkeel-apps"},
-		{Name: "platform_dir", Cmd: "mkdir -p /opt/ezkeel"},
+
+		// Privileged — docker daemon socket is root-owned by default.
+		{Name: "ezkeel_apps_network", Cmd: "sudo -n docker network inspect ezkeel-apps >/dev/null 2>&1 || sudo -n docker network create ezkeel-apps"},
+
+		// Privileged — /opt is root-owned on most distros.
+		{Name: "platform_dir", Cmd: "sudo -n mkdir -p /opt/ezkeel"},
+
+		// Privileged — caddyfileWriteCmd / caddyComposeWriteCmd use
+		// `sudo -n tee` for the actual writes; `test -f` guards
+		// short-circuit before sudo runs on idempotent re-runs.
 		{Name: "caddyfile_write", Cmd: caddyfileWriteCmd()},
 		{Name: "caddy_compose_write", Cmd: caddyComposeWriteCmd()},
-		{Name: "caddy_up", Cmd: "test -f /opt/ezkeel/docker-compose.yml || (cd /opt/ezkeel && docker compose -p ezkeel up -d)"},
+
+		// Privileged — docker daemon socket access.
+		{Name: "caddy_up", Cmd: "test -f /opt/ezkeel/docker-compose.yml || (cd /opt/ezkeel && sudo -n docker compose -p ezkeel up -d)"},
 	}
 }
 

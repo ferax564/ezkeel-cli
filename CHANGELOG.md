@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ezkeel init <project>` now scaffolds an `ezkeel.yaml` next to the existing `workspace.yaml`.
 - Default Go build now emits `-o /app/app` so the runner stage's COPY finds the binary regardless of source package layout.
 - Default Rust start now references `./app` (the runner-stage path) instead of the builder-only `./target/release/app`.
+- Bootstrap commands now prefix privileged steps with `sudo -n` so a non-root SSH user (e.g. `ubuntu`/`debian` on AWS/Vultr/Scaleway) with passwordless sudo can run `ezkeel server add` end-to-end. Root SSH users are unaffected (`sudo -n` is a no-op as root).
 
 ### Fixed
 - Generated Dockerfile templates now honor `ezkeel.yaml` `build:` and (for Go/Rust) `start:` overrides instead of hardcoding `npm run build` / `go build ./...` / `cargo build --release` and `CMD ["./app"]`. Next.js, Vite/SPA, and Node SSR templates thread `build:` through; Go and Rust thread both `build:` and `start:` through.
