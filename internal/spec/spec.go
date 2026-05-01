@@ -8,8 +8,10 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -18,6 +20,21 @@ import (
 // Stamp is the required first-line marker. Bumped only for breaking changes;
 // additive fields stay on v1.
 const Stamp = "# spec: ezkeel/v1"
+
+// validNameRe matches RFC 1123 hostname-safe app names: lowercase
+// letters, digits, and dashes; first and last char must be alphanumeric;
+// 1-63 chars enforced separately. Spec.Name is interpolated into Docker
+// tags, DNS labels, and remote shell commands (Caddyfile route writers
+// in cmd/ezkeel/server.go), so we restrict to a tight allowlist at parse
+// time rather than escape downstream.
+var validNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+func validAppName(name string) bool {
+	if len(name) < 1 || len(name) > 63 {
+		return false
+	}
+	return validNameRe.MatchString(name)
+}
 
 // Spec is the v1 deploy spec parsed from ezkeel.yaml.
 type Spec struct {
@@ -63,10 +80,28 @@ func Load(path string) (*Spec, error) {
 	if s.Name == "" {
 		return nil, fmt.Errorf("%s: name is required", path)
 	}
+	if !validAppName(s.Name) {
+		return nil, fmt.Errorf("%s: invalid name %q (must be lowercase letters, digits, dashes; 1-63 chars; matches RFC1123 hostname)", path, s.Name)
+	}
 	if s.Runtime == "" {
 		s.Runtime = "docker"
 	}
 	return &s, nil
+}
+
+// LoadFromDir loads ezkeel.yaml from exactly dir (no walk-up). Returns
+// (nil, nil) if the file does not exist; returns an error for parse
+// failures or other I/O issues. Used by `ezkeel up <repo-url>` so a
+// missing spec in the clone does not silently pick up unrelated files
+// from /tmp parent dirs.
+func LoadFromDir(dir string) (*Spec, error) {
+	path := filepath.Join(dir, "ezkeel.yaml")
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("stat %q: %w", path, err)
+	}
+	return Load(path)
 }
 
 // Find walks up from startDir looking for ezkeel.yaml, returning the

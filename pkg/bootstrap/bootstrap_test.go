@@ -3,6 +3,8 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -71,7 +73,7 @@ func TestRunDockerMissingTriggersInstall(t *testing.T) {
 	if len(r.calls) != 11 {
 		t.Fatalf("calls = %d, want 11 (probe, install, download, verify, +7 caddy)", len(r.calls))
 	}
-	if !strings.Contains(r.calls[1], "get.docker.com") {
+	if !strings.Contains(r.calls[1], "https://get.docker.com") {
 		t.Errorf("call 1 = %q", r.calls[1])
 	}
 }
@@ -305,7 +307,10 @@ func TestShellQuoteWithSingleQuote(t *testing.T) {
 func TestStepsExposed_AgentDownloadIsQuoted(t *testing.T) {
 	// AgentURL with `&` query params must be single-quoted so the remote
 	// login shell doesn't treat `&` as a backgrounding operator and split
-	// curl off from chmod.
+	// curl off from chmod. Privileged steps now wrap the && chain in
+	// `sh -c '...'` so the URL needs two-level quote escaping (close,
+	// `\'`-escape, reopen) — see shellQuoteForSingleQuoted. Assert the
+	// emitted form contains the close-escape-reopen URL signature.
 	steps := Steps(Options{AgentURL: "https://x.example/path?a=1&b=2"})
 	var dl Step
 	for _, s := range steps {
@@ -317,8 +322,12 @@ func TestStepsExposed_AgentDownloadIsQuoted(t *testing.T) {
 	if dl.Cmd == "" {
 		t.Fatal("agent_download step missing from Steps()")
 	}
-	if !strings.Contains(dl.Cmd, `'https://x.example/path?a=1&b=2'`) {
-		t.Errorf("agent_download URL must be single-quoted; got: %q", dl.Cmd)
+	// `'\''` closes the outer single-quote, emits a literal `'`,
+	// reopens — so the URL itself stays inside its own single-quote
+	// pair across both layers.
+	wantURL := `'\''https://x.example/path?a=1&b=2'\''`
+	if !strings.Contains(dl.Cmd, wantURL) {
+		t.Errorf("agent_download URL must be two-level single-quoted (%q); got: %q", wantURL, dl.Cmd)
 	}
 }
 
@@ -396,26 +405,38 @@ func TestRunCaddyUpFails(t *testing.T) {
 	}
 }
 
-// TestPrivilegedStepsUseSudo guards the non-root bootstrap path. Cloud
-// images (AWS, Vultr, Scaleway) default to a non-root user with
-// passwordless sudo; without `sudo -n` on the privileged steps, every
-// bootstrap on those providers would fail at the first /etc or /opt
-// write. Read-only steps (docker_probe, agent_verify) deliberately
-// avoid sudo — covered separately by TestReadOnlyStepsAvoidSudo.
-func TestPrivilegedStepsUseSudo(t *testing.T) {
+// TestPrivilegedStepsUsePrivCmd guards both bootstrap paths: SSH-as-root
+// on minimal images (Hetzner default, Alpine, stripped Debian) where
+// `sudo` may not be installed AND non-root cloud images (ubuntu/debian
+// on AWS/Vultr/Scaleway) with passwordless sudo. Every privileged step
+// must emit both branches via privCmd's `if uid==0 then ... else
+// sudo -n ... fi` shape. Read-only steps deliberately stay unwrapped —
+// covered separately by TestReadOnlyStepsAvoidSudo.
+//
+// docker_group_add is the one privileged step that intentionally does
+// NOT round-trip through privCmd: as root there is no point adding
+// "root" to the docker group, so the explicit non-root guard handles
+// the no-op case directly.
+func TestPrivilegedStepsUsePrivCmd(t *testing.T) {
 	steps := Steps(Options{AgentURL: "https://example/agent"})
 	privileged := []string{
 		"docker_install", "agent_download", "ezkeel_apps_network",
 		"platform_dir", "caddyfile_write", "caddy_compose_write", "caddy_up",
-		"chown_platform_dir", "docker_group_add",
+		"chown_platform_dir",
 	}
 	privSet := make(map[string]bool, len(privileged))
 	for _, n := range privileged {
 		privSet[n] = true
 	}
 	for _, s := range steps {
-		if privSet[s.Name] && !strings.Contains(s.Cmd, "sudo -n") {
-			t.Errorf("step %q is privileged but command lacks `sudo -n`: %q", s.Name, s.Cmd)
+		if !privSet[s.Name] {
+			continue
+		}
+		if !strings.Contains(s.Cmd, `if [ "$(id -u)" = "0" ]; then`) {
+			t.Errorf("step %q is privileged but command lacks privCmd root branch: %q", s.Name, s.Cmd)
+		}
+		if !strings.Contains(s.Cmd, "sudo -n") {
+			t.Errorf("step %q is privileged but command lacks `sudo -n` non-root branch: %q", s.Name, s.Cmd)
 		}
 	}
 }
@@ -431,5 +452,126 @@ func TestReadOnlyStepsAvoidSudo(t *testing.T) {
 		if readOnly[s.Name] && strings.Contains(s.Cmd, "sudo") {
 			t.Errorf("read-only step %q should not invoke sudo: %q", s.Name, s.Cmd)
 		}
+	}
+}
+
+// TestPrivCmdEmitsBothBranches pins privCmd's exact emitted shape so
+// the root-direct + sudo fallback cannot drift independently. A regex
+// or substring-only test would let one branch silently break.
+func TestPrivCmdEmitsBothBranches(t *testing.T) {
+	got := privCmd("echo hi")
+	if !strings.Contains(got, `if [ "$(id -u)" = "0" ]; then echo hi`) {
+		t.Errorf("missing root branch: %q", got)
+	}
+	if !strings.Contains(got, "else sudo -n echo hi") {
+		t.Errorf("missing non-root branch: %q", got)
+	}
+	if !strings.HasSuffix(got, "; fi") {
+		t.Errorf("missing fi terminator: %q", got)
+	}
+}
+
+// TestStepsParseAsValidShell catches structural shell bugs that
+// substring assertions miss — heredoc terminators not on their own
+// line, unbalanced quotes, missing semicolons. Runs every step through
+// `bash -n` (parse without executing). Skipped when bash is not on
+// PATH so the test stays portable to CI runners that ship only sh.
+func TestStepsParseAsValidShell(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not on PATH — cannot syntax-check shell snippets")
+	}
+	for _, s := range Steps(Options{AgentURL: "https://x.example/agent?a=1&b=2"}) {
+		c := exec.Command("bash", "-n")
+		c.Stdin = strings.NewReader(s.Cmd)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Errorf("step %s shell-syntax invalid: %v\n%s\nCMD:\n%s", s.Name, err, out, s.Cmd)
+		}
+	}
+}
+
+// TestAgentDownloadURLSurvivesShellWordSplit pins the regression that
+// nearly shipped: when the privCmd refactor wrapped agent_download in
+// `sh -c '...'`, naively dropping a single-quoted URL inside ended the
+// outer quote string mid-way and turned `&` query params into job
+// separators. The emitted command must, when actually parsed by sh,
+// preserve the URL as a single argument with the `&` intact.
+//
+// Test strategy: build a temp dir with shim scripts named `curl` and
+// `chmod` that print argv, prepend it to PATH, then exec the actual
+// emitted Cmd through bash. The URL must show up as one argument to
+// the curl shim — not split into `https://...?a=1` plus a backgrounded
+// `b=2`.
+func TestAgentDownloadURLSurvivesShellWordSplit(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not on PATH")
+	}
+	url := "https://x.example/agent?a=1&b=2"
+	steps := Steps(Options{AgentURL: url})
+	var dl string
+	for _, s := range steps {
+		if s.Name == "agent_download" {
+			dl = s.Cmd
+			break
+		}
+	}
+	if dl == "" {
+		t.Fatal("agent_download step missing")
+	}
+
+	shimDir := t.TempDir()
+	curlShim := `#!/bin/sh
+for a in "$@"; do printf 'CURL_ARG[%s]\n' "$a"; done
+`
+	chmodShim := `#!/bin/sh
+for a in "$@"; do printf 'CHMOD_ARG[%s]\n' "$a"; done
+`
+	// Shim sudo so the non-root branch (the one that actually runs in
+	// `go test` on a dev box) drops -n + the wrapped command and execs
+	// it directly through our shim PATH. Without this, sudo fails with
+	// "a password is required" and the test never gets to verify
+	// argv preservation.
+	sudoShim := `#!/bin/sh
+# Strip leading -n / -- flags then exec the rest under our shim PATH.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|-E|-S) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+`
+	// Shim id so the root branch is forced regardless of the host's
+	// real uid. That keeps the test deterministic on both root CI
+	// runners and dev macOS.
+	idShim := `#!/bin/sh
+case "$1" in
+  -u) echo 0 ;;
+  -un) echo root ;;
+  -gn) echo root ;;
+  *) echo "uid=0(root)" ;;
+esac
+`
+	for name, body := range map[string]string{
+		"curl": curlShim, "chmod": chmodShim,
+		"sudo": sudoShim, "id": idShim,
+	} {
+		p := shimDir + "/" + name
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatalf("seed shim %s: %v", name, err)
+		}
+	}
+
+	// Prepend our shim dir to the existing PATH so `id`, `sudo`, etc.
+	// remain available. Our `curl` and `chmod` shims win because the
+	// shim dir comes first.
+	c := exec.Command("bash", "-c", dl)
+	c.Env = append(c.Environ(), "PATH="+shimDir+":"+os.Getenv("PATH"))
+	out, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bash exec: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "CURL_ARG["+url+"]") {
+		t.Errorf("URL did not survive as a single argument to curl; output:\n%s", out)
 	}
 }

@@ -362,16 +362,36 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// validation here means a clear plain-error instead of a
 	// misleading "no Dockerfile template" failure deep in the build
 	// step. The spec is then re-used inside Step 0 by applySpec.
+	//
+	// Resolution policy depends on how we got the source:
+	//   - Repo URL clone (tempDir != ""): only check the clone root.
+	//     Walking up parents would land in /tmp and could pick up an
+	//     unrelated ezkeel.yaml from a sibling clone or a bind mount.
+	//   - Local cwd deploy: walk up via spec.Find so a project nested
+	//     inside subdirs still finds the repo-root spec.
 	var loadedSpec *spec.Spec
-	if specPath, ferr := spec.Find(sourceDir); ferr == nil {
-		s, lerr := spec.Load(specPath)
+	if tempDir != "" {
+		s, lerr := spec.LoadFromDir(tempDir)
 		if lerr != nil {
-			return fmt.Errorf("loading %s: %w", specPath, lerr)
+			return fmt.Errorf("loading ezkeel.yaml: %w", lerr)
 		}
-		if verr := validateSpecFramework(s); verr != nil {
-			return fmt.Errorf("%s: %w", specPath, verr)
+		if s != nil {
+			if verr := validateSpecFramework(s); verr != nil {
+				return fmt.Errorf("%s: %w", filepath.Join(tempDir, "ezkeel.yaml"), verr)
+			}
+			loadedSpec = s
 		}
-		loadedSpec = s
+	} else {
+		if specPath, ferr := spec.Find(sourceDir); ferr == nil {
+			s, lerr := spec.Load(specPath)
+			if lerr != nil {
+				return fmt.Errorf("loading %s: %w", specPath, lerr)
+			}
+			if verr := validateSpecFramework(s); verr != nil {
+				return fmt.Errorf("%s: %w", specPath, verr)
+			}
+			loadedSpec = s
+		}
 	}
 
 	// Step 3: Determine app name (--name > spec.Name > repo > dir)
