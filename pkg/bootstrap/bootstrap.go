@@ -11,8 +11,18 @@ import (
 	"strings"
 )
 
-// DefaultAgentURL is the release asset fetched when Options.AgentURL is empty.
-const DefaultAgentURL = "https://github.com/ferax564/ezkeel-cli/releases/latest/download/ezkeel-agent-linux-amd64"
+// DefaultAgentURL is the release asset fetched when Options.AgentURL is
+// empty. The `{ARCH}` placeholder is substituted at runtime by the
+// agent_download step (see Steps): a `uname -m` probe maps the host
+// architecture to amd64 or arm64 so a single binary build works on
+// x86_64 hosts (Hetzner CX) AND arm64 hosts (Hetzner CAX, AWS Graviton).
+// Without per-host substitution, an arm64 host would install the amd64
+// binary and fail at agent_verify with "exec format error".
+//
+// Custom AgentURL overrides without `{ARCH}` are still supported: the
+// runtime sed substitution is a no-op when the placeholder is absent,
+// so callers pinning a single fixed binary keep their existing URL.
+const DefaultAgentURL = "https://github.com/ferax564/ezkeel-cli/releases/latest/download/ezkeel-agent-linux-{ARCH}"
 
 // minimalCaddyfile is the deploy-target Caddyfile. Empty of routes by
 // design — `ezkeel up <repo>` later writes per-app reverse_proxy entries
@@ -238,6 +248,17 @@ func Steps(opts Options) []Step {
 
 		// Privileged — write to /usr/local/bin and chmod. Wrapped in
 		// `sh -c` so the && chain stays under one privilege wrapper.
+		//
+		// Architecture detection: probes `uname -m` and substitutes the
+		// `{ARCH}` placeholder in the URL with `amd64` or `arm64`. This
+		// makes a single binary build work on x86_64 hosts (Hetzner CX)
+		// AND arm64 hosts (Hetzner CAX, AWS Graviton). Without this,
+		// arm64 hosts would install the amd64 binary and fail at
+		// agent_verify with "exec format error". When the URL has no
+		// `{ARCH}` placeholder (e.g. a custom Options.AgentURL pinning
+		// a single fixed binary), the sed substitution is a no-op and
+		// the URL passes through unchanged.
+		//
 		// The URL must stay single-quoted INSIDE the sh -c body
 		// (defends against `&` query separators getting parsed as
 		// backgrounding operators) AND the outer body is itself
@@ -245,7 +266,7 @@ func Steps(opts Options) []Step {
 		// the two-level quote escaping; a plain shellQuote() would
 		// terminate the outer string mid-way.
 		{Name: "agent_download", Cmd: privCmd(fmt.Sprintf(
-			`sh -c 'curl -fsSL -o /usr/local/bin/ezkeel-agent %s && chmod +x /usr/local/bin/ezkeel-agent'`,
+			`sh -c 'ARCH=$(uname -m); case "$ARCH" in x86_64|amd64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; esac; URL=$(echo %s | sed "s/{ARCH}/$ARCH/g"); curl -fsSL -o /usr/local/bin/ezkeel-agent "$URL" && chmod +x /usr/local/bin/ezkeel-agent'`,
 			shellQuoteForSingleQuoted(url),
 		))},
 

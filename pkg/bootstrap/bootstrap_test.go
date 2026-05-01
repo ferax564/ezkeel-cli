@@ -331,6 +331,53 @@ func TestStepsExposed_AgentDownloadIsQuoted(t *testing.T) {
 	}
 }
 
+// TestDefaultAgentURLContainsArchPlaceholder pins the {ARCH} substitution
+// contract: the default URL ships a placeholder so the agent_download
+// step's runtime `uname -m` probe can pick the right binary on x86_64
+// vs arm64 hosts. Without the placeholder, every install would pull
+// linux-amd64 and arm64 hosts (Hetzner CAX, AWS Graviton) would fail at
+// agent_verify with "exec format error".
+func TestDefaultAgentURLContainsArchPlaceholder(t *testing.T) {
+	if !strings.Contains(DefaultAgentURL, "{ARCH}") {
+		t.Errorf("DefaultAgentURL must use {ARCH} placeholder for runtime substitution: %q", DefaultAgentURL)
+	}
+}
+
+// TestAgentDownloadArchSubstitution verifies the agent_download step
+// probes uname -m at runtime, accepts both kernel-style (x86_64,
+// aarch64) and Go-style (amd64, arm64) architecture names, and
+// substitutes {ARCH} in the URL via sed. The substitution is a no-op
+// for URLs without the placeholder so custom Options.AgentURL pinning
+// a single fixed binary still works.
+func TestAgentDownloadArchSubstitution(t *testing.T) {
+	steps := Steps(Options{AgentURL: "https://x.example/agent-linux-{ARCH}"})
+	var dl Step
+	for _, s := range steps {
+		if s.Name == "agent_download" {
+			dl = s
+			break
+		}
+	}
+	if dl.Cmd == "" {
+		t.Fatal("agent_download step missing from Steps()")
+	}
+	if !strings.Contains(dl.Cmd, "uname -m") {
+		t.Errorf("agent_download must probe uname -m: %q", dl.Cmd)
+	}
+	if !strings.Contains(dl.Cmd, "{ARCH}") {
+		t.Errorf("agent_download must substitute {ARCH} at runtime: %q", dl.Cmd)
+	}
+	if !strings.Contains(dl.Cmd, "x86_64") {
+		t.Errorf("agent_download must accept x86_64 alias: %q", dl.Cmd)
+	}
+	if !strings.Contains(dl.Cmd, "aarch64") {
+		t.Errorf("agent_download must accept aarch64 alias: %q", dl.Cmd)
+	}
+	if !strings.Contains(dl.Cmd, "sed") {
+		t.Errorf("agent_download must use sed for the {ARCH} substitution: %q", dl.Cmd)
+	}
+}
+
 func TestCaddyComposeWriteSkipsForPlatformInstall(t *testing.T) {
 	// `ezkeel platform install` writes /opt/ezkeel/docker-compose.yml
 	// (note the hyphen). On a host that has the full platform stack

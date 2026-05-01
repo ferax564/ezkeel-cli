@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/ferax564/ezkeel-cli/internal/ai"
@@ -13,12 +14,35 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// validProjectNameRe matches the same RFC 1123-style allowlist as
+// internal/spec.validNameRe so a name accepted by `ezkeel init` is
+// also accepted by `ezkeel up` reading the scaffolded ezkeel.yaml.
+// Lowercase letters and digits, dashes allowed in the middle, 1-63
+// chars total. Without this guard, `ezkeel init MyApp` would
+// scaffold `name: MyApp` into the spec and the next `ezkeel up`
+// would abort because spec.Load rejects mixed-case names.
+var validProjectNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+func validProjectName(name string) bool {
+	if len(name) < 1 || len(name) > 63 {
+		return false
+	}
+	return validProjectNameRe.MatchString(name)
+}
+
 var initCmd = &cobra.Command{
 	Use:   "init <project-name>",
 	Short: "Initialize a new EZKeel project",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectName := args[0]
+		// Reject up front so we don't scaffold templates and create
+		// remote Forgejo / Infisical resources for a name `ezkeel up`
+		// will later reject. The user picked the name; surface the
+		// rule with a clear hint instead of silently normalizing.
+		if !validProjectName(projectName) {
+			return fmt.Errorf("invalid project name %q: must be lowercase letters, digits, and dashes only (1-63 chars, RFC 1123 hostname). Try `ezkeel init my-app` instead", projectName)
+		}
 		forgejoURL, _ := cmd.Flags().GetString("forgejo-url")
 		forgejoToken, _ := cmd.Flags().GetString("forgejo-token")
 

@@ -310,6 +310,91 @@ func TestGenerateDockerfile_HonorsViteBuildOverride(t *testing.T) {
 	}
 }
 
+// TestGenerateDockerfile_ExpressBuildOverride pins the Express/Fastify/
+// Hono template's build behavior. A spec with build set (e.g. a
+// TypeScript Express server: build = `npm run build`, start =
+// `node dist/index.js`) MUST run the build step in the Dockerfile and
+// MUST keep dev dependencies for the build (tsc, esbuild, etc.). Before
+// this fix the template was hardcoded to `npm ci --omit=dev` with no
+// RUN build, so the dist/ directory the start command referenced never
+// existed and the container crashed at boot.
+func TestGenerateDockerfile_ExpressBuildOverride(t *testing.T) {
+	fr := &FrameworkResult{
+		Framework:  FrameworkExpress,
+		Build:      "npm run build",
+		Start:      "node dist/index.js",
+		Port:       3000,
+		Dockerfile: "auto",
+	}
+	out := GenerateDockerfile(fr)
+	if !strings.Contains(out, "RUN npm run build") {
+		t.Errorf("Express+build must run the build step:\n%s", out)
+	}
+	if strings.Contains(out, "npm ci --omit=dev") {
+		t.Errorf("Express+build must keep dev deps for the build:\n%s", out)
+	}
+	if !strings.Contains(out, "dist/index.js") {
+		t.Errorf("CMD must use overridden start:\n%s", out)
+	}
+}
+
+// TestGenerateDockerfile_ExpressNoBuild guards the no-build path: a
+// plain JS Express spec (no build step) keeps the smaller `--omit=dev`
+// install and emits no RUN build line.
+func TestGenerateDockerfile_ExpressNoBuild(t *testing.T) {
+	fr := &FrameworkResult{
+		Framework:  FrameworkExpress,
+		Start:      "node index.js",
+		Port:       3000,
+		Dockerfile: "auto",
+	}
+	out := GenerateDockerfile(fr)
+	if strings.Contains(out, "RUN npm run build") {
+		t.Errorf("Express without build must not run a build step:\n%s", out)
+	}
+	if !strings.Contains(out, "npm ci --omit=dev") {
+		t.Errorf("Express without build should use --omit=dev for smaller image:\n%s", out)
+	}
+}
+
+// TestGenerateDockerfile_HonoBuildOverride confirms Hono shares the
+// fix — same single-stage template as Express/Fastify.
+func TestGenerateDockerfile_HonoBuildOverride(t *testing.T) {
+	fr := &FrameworkResult{
+		Framework:  FrameworkHono,
+		Build:      "npm run build",
+		Start:      "node dist/server.js",
+		Port:       3000,
+		Dockerfile: "auto",
+	}
+	out := GenerateDockerfile(fr)
+	if !strings.Contains(out, "RUN npm run build") {
+		t.Errorf("Hono+build must run the build step:\n%s", out)
+	}
+	if strings.Contains(out, "npm ci --omit=dev") {
+		t.Errorf("Hono+build must keep dev deps for the build:\n%s", out)
+	}
+}
+
+// TestGenerateDockerfile_FastifyBuildOverride confirms Fastify shares
+// the fix.
+func TestGenerateDockerfile_FastifyBuildOverride(t *testing.T) {
+	fr := &FrameworkResult{
+		Framework:  FrameworkFastify,
+		Build:      "npm run build",
+		Start:      "node dist/server.js",
+		Port:       3000,
+		Dockerfile: "auto",
+	}
+	out := GenerateDockerfile(fr)
+	if !strings.Contains(out, "RUN npm run build") {
+		t.Errorf("Fastify+build must run the build step:\n%s", out)
+	}
+	if strings.Contains(out, "npm ci --omit=dev") {
+		t.Errorf("Fastify+build must keep dev deps for the build:\n%s", out)
+	}
+}
+
 // TestGenerateDockerfile_HonorsRemixBuildOverride covers the Node SSR
 // template (Remix/Nuxt/Astro share it).
 func TestGenerateDockerfile_HonorsRemixBuildOverride(t *testing.T) {

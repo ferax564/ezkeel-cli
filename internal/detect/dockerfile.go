@@ -94,15 +94,36 @@ CMD ["caddy", "file-server", "--root", "/srv"]
 
 // generateNodeServerDockerfile produces a single-stage Dockerfile for
 // Node.js server frameworks (Express, Hono, Fastify).
+//
+// When fr.Build is set (e.g. `npm run build` for a TypeScript Express
+// server), this honors it: install ALL deps with `npm ci` (not
+// `npm ci --omit=dev`), run the build, then ship. Without this, a
+// TS-Express spec would scaffold `start: node dist/index.js` but the
+// build step that produces `dist/` would never run — the container
+// would crash at boot trying to require a non-existent path. Some
+// runtime libraries (tsx, ts-node) also live in devDependencies and
+// are imported at runtime, which `--omit=dev` would strip.
+//
+// When fr.Build is empty (plain JS), keep `--omit=dev` for a smaller
+// runtime image — there's no build step to run.
 func generateNodeServerDockerfile(fr *FrameworkResult) string {
+	npmInstall := "npm ci --omit=dev"
+	buildStep := ""
+	if fr.Build != "" {
+		// Need full deps: the build step likely uses tsc / esbuild /
+		// etc. from devDependencies, and some runtimes (tsx, ts-node)
+		// require devDependencies at runtime.
+		npmInstall = "npm ci"
+		buildStep = fmt.Sprintf("RUN %s\n", fr.Build)
+	}
 	return fmt.Sprintf(`FROM node:22-alpine
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+RUN %s
 COPY . .
-EXPOSE %d
+%sEXPOSE %d
 CMD %s
-`, fr.Port, shellToCMD(fr.Start))
+`, npmInstall, buildStep, fr.Port, shellToCMD(fr.Start))
 }
 
 // generateNodeSSRDockerfile produces a 3-stage Dockerfile for SSR Node.js
