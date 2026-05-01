@@ -2,6 +2,7 @@ package detect
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -303,5 +304,35 @@ func needsShell(cmd string) bool {
 			return true
 		}
 	}
+
+	// A leading env-var assignment (FIRST whitespace-delimited token of
+	// the form NAME=value) means the command relies on a shell to bind
+	// those vars before exec'ing the rest. Exec-form would treat them
+	// as the binary name and fail. We deliberately do NOT trigger on
+	// later tokens like `--host=0.0.0.0` — only the first token's
+	// shape matters.
+	if firstToken := firstField(cmd); firstToken != "" {
+		if envAssignmentRe.MatchString(firstToken) {
+			return true
+		}
+	}
+
 	return false
 }
+
+// firstField returns the first whitespace-separated token, or "" if
+// the input has no non-whitespace.
+func firstField(s string) string {
+	f := strings.Fields(s)
+	if len(f) == 0 {
+		return ""
+	}
+	return f[0]
+}
+
+// envAssignmentRe matches a leading shell env-var assignment like
+// `NODE_ENV=production` or `_FOO=bar` but NOT `--flag=value` or
+// `not_a_var=...` (lowercase start). Conservative: env names must
+// start with an uppercase letter or underscore, then uppercase
+// letters/digits/underscores, then `=` and any value.
+var envAssignmentRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*=`)

@@ -495,6 +495,60 @@ func TestNeedsShell(t *testing.T) {
 	}
 }
 
+// TestNeedsShell_EnvAssignmentTriggersShell asserts that a leading
+// shell env-var assignment routes through shell-form CMD. Without
+// this, specs like `start: NODE_ENV=production node server.js` would
+// emit exec-form CMD ["NODE_ENV=production", "node", ...] and Docker
+// would try to exec a binary literally named NODE_ENV=production.
+func TestNeedsShell_EnvAssignmentTriggersShell(t *testing.T) {
+	cases := []string{
+		"NODE_ENV=production node server.js",
+		"PORT=8080 ./app",
+		"FOO=bar BAR=baz ./binary --flag",
+		"_PRIVATE=x ./run",
+		"DATABASE_URL=postgres://... node migrate",
+	}
+	for _, c := range cases {
+		if !needsShell(c) {
+			t.Errorf("needsShell(%q) = false, want true (leading env var)", c)
+		}
+	}
+}
+
+// TestNeedsShell_FlagWithEqualsStaysExec pins the conservative match:
+// only the FIRST token, only uppercase-leading names, are treated as
+// env assignments. Flags with `=` (e.g. --host=0.0.0.0) and
+// lowercase-leading names stay in exec-form.
+func TestNeedsShell_FlagWithEqualsStaysExec(t *testing.T) {
+	cases := []string{
+		"uvicorn main:app --host=0.0.0.0",
+		"node server.js --port=3000",
+		"flask run --host=0.0.0.0 --port=5000",
+		"ls --color=auto",
+		"lowercase_var=value ./app", // lowercase var name → not detected as env assignment
+	}
+	for _, c := range cases {
+		if needsShell(c) {
+			t.Errorf("needsShell(%q) = true, want false (flag with =, not env)", c)
+		}
+	}
+}
+
+// TestShellToCMD_EnvAssignmentEmitsShellForm verifies the end-to-end
+// shape: a leading env-var assignment produces shell-form CMD
+// (verbatim, Docker wraps with sh -c) instead of broken exec-form.
+func TestShellToCMD_EnvAssignmentEmitsShellForm(t *testing.T) {
+	got := shellToCMD("NODE_ENV=production node server.js")
+	// Should NOT be exec-form
+	if strings.HasPrefix(got, "[") {
+		t.Errorf("got exec-form %q; expected shell-form for leading env var", got)
+	}
+	// Should be the verbatim string (Docker wraps in sh -c)
+	if got != "NODE_ENV=production node server.js" {
+		t.Errorf("got %q; expected verbatim shell-form", got)
+	}
+}
+
 // TestGenerateDockerfile_PythonShellStart asserts that a Python spec
 // with a shell-form start command (sh -c "...") generates a working
 // Dockerfile that uses shell-form CMD. Before this fix, Fields-split
