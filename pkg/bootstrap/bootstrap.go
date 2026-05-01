@@ -14,6 +14,43 @@ import (
 // DefaultAgentURL is the release asset fetched when Options.AgentURL is empty.
 const DefaultAgentURL = "https://github.com/ferax564/ezkeel-cli/releases/latest/download/ezkeel-agent-linux-amd64"
 
+// minimalCaddyfile is the deploy-target Caddyfile. Empty of routes by
+// design — `ezkeel up <repo>` later writes per-app reverse_proxy entries
+// via cmd/ezkeel/server.go's addCaddyRoute().
+const minimalCaddyfile = `# Managed by ezkeel server add. Per-app routes are
+# appended below by ezkeel up.
+
+{
+    admin off
+}
+`
+
+// minimalCaddyCompose runs Caddy on the external ezkeel-apps network with
+// host ports 80/443. The compose project name is "ezkeel" so the resulting
+// container is "ezkeel-caddy-1" (matches cmd/ezkeel/server.go's
+// caddyContainer constant).
+const minimalCaddyCompose = `name: ezkeel
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    networks:
+      - ezkeel-apps
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+
+networks:
+  ezkeel-apps:
+    external: true
+`
+
 // Runner executes a shell command on the target host and returns
 // combined stdout+stderr. Implementations are responsible for
 // transport (ssh, exec.CommandContext, etc.).
@@ -40,9 +77,24 @@ func (o Options) agentURL() string {
 	return DefaultAgentURL
 }
 
+// caddyfileWriteCmd returns the heredoc shell command that writes the
+// minimal Caddyfile to /opt/ezkeel/Caddyfile. Single-quoted heredoc
+// delimiter prevents shell expansion of the body.
+func caddyfileWriteCmd() string {
+	return fmt.Sprintf("cat > /opt/ezkeel/Caddyfile <<'EZKEELEOF'\n%sEZKEELEOF", minimalCaddyfile)
+}
+
+// caddyComposeWriteCmd returns the heredoc shell command that writes
+// the minimal Caddy compose stack to /opt/ezkeel/compose.yml.
+func caddyComposeWriteCmd() string {
+	return fmt.Sprintf("cat > /opt/ezkeel/compose.yml <<'EZKEELEOF'\n%sEZKEELEOF", minimalCaddyCompose)
+}
+
 // Steps returns the bootstrap command sequence with stable names. The
 // docker_install step is included unconditionally; Run() skips it
-// when docker_probe succeeds.
+// when docker_probe succeeds. Steps after agent_verify install a
+// minimal Caddy compose stack so cmd/ezkeel/server.go's network-connect
+// step has a target on a truly fresh box.
 func Steps(opts Options) []Step {
 	url := opts.agentURL()
 	return []Step{
@@ -53,6 +105,11 @@ func Steps(opts Options) []Step {
 			url,
 		)},
 		{Name: "agent_verify", Cmd: "ezkeel-agent --version"},
+		{Name: "ezkeel_apps_network", Cmd: "docker network inspect ezkeel-apps >/dev/null 2>&1 || docker network create ezkeel-apps"},
+		{Name: "platform_dir", Cmd: "mkdir -p /opt/ezkeel"},
+		{Name: "caddyfile_write", Cmd: caddyfileWriteCmd()},
+		{Name: "caddy_compose_write", Cmd: caddyComposeWriteCmd()},
+		{Name: "caddy_up", Cmd: "cd /opt/ezkeel && docker compose -p ezkeel up -d"},
 	}
 }
 
@@ -63,9 +120,14 @@ func Steps(opts Options) []Step {
 //     of writing a 404 page over the binary path.
 //  3. ezkeel-agent --version — catches a curl-success-but-bad-bytes
 //     case where the binary path holds a 404 page.
+//  4. Steps 4+ install a minimal Caddy compose stack at /opt/ezkeel
+//     (network, dir, files, compose up). They run unconditionally and
+//     surface real errors — they're idempotent so re-running on a
+//     healthy box is a no-op.
 func Run(ctx context.Context, runner Runner, opts Options) error {
 	steps := Steps(opts)
 
+	// docker_probe → docker_install (conditional) → agent_download → agent_verify
 	if _, err := runner.Run(ctx, steps[0].Cmd); err != nil {
 		if _, installErr := runner.Run(ctx, steps[1].Cmd); installErr != nil {
 			return fmt.Errorf("docker install: %w", installErr)
@@ -79,6 +141,13 @@ func Run(ctx context.Context, runner Runner, opts Options) error {
 	out, err := runner.Run(ctx, steps[3].Cmd)
 	if err != nil {
 		return fmt.Errorf("agent --version: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// Steps 4+ run unconditionally and surface real errors.
+	for i := 4; i < len(steps); i++ {
+		if _, err := runner.Run(ctx, steps[i].Cmd); err != nil {
+			return fmt.Errorf("%s: %w", steps[i].Name, err)
+		}
 	}
 	return nil
 }

@@ -149,6 +149,46 @@ func TestApplySpec_ReportsOverridden(t *testing.T) {
 	}
 }
 
+func TestApplySpec_SetsDockerfileAutoWhenSpecRescues(t *testing.T) {
+	fr := &detect.FrameworkResult{Framework: detect.FrameworkUnknown, Dockerfile: ""}
+	applySpec(fr, &spec.Spec{Name: "x", Framework: "rust"})
+	if fr.Framework != detect.Framework("rust") {
+		t.Errorf("Framework = %q, want rust", fr.Framework)
+	}
+	if fr.Dockerfile != "auto" {
+		t.Errorf("Dockerfile = %q, want auto", fr.Dockerfile)
+	}
+}
+
+func TestApplySpec_PreservesExistingDockerfile(t *testing.T) {
+	fr := &detect.FrameworkResult{Framework: detect.FrameworkExpress, Dockerfile: "Dockerfile"}
+	applySpec(fr, &spec.Spec{Name: "x", Framework: "rust"})
+	// Spec overrode framework but the repo already had a Dockerfile —
+	// don't clobber it to "auto".
+	if fr.Dockerfile != "Dockerfile" {
+		t.Errorf("Dockerfile = %q, want Dockerfile preserved", fr.Dockerfile)
+	}
+}
+
+func TestApplyServicesFromSpec_OverridesDetect(t *testing.T) {
+	detected := &detect.DatabaseResult{Engine: detect.DBNone}
+	got := applyServicesFromSpec(detected, &spec.Spec{
+		Name:     "x",
+		Services: map[string]spec.Service{"db": {Engine: "postgres"}},
+	})
+	if got.Engine != detect.DBPostgres {
+		t.Errorf("Engine = %q, want postgres", got.Engine)
+	}
+}
+
+func TestApplyServicesFromSpec_NilSpecNoop(t *testing.T) {
+	detected := &detect.DatabaseResult{Engine: detect.DBPostgres}
+	got := applyServicesFromSpec(detected, nil)
+	if got != detected {
+		t.Errorf("expected unchanged pointer for nil spec")
+	}
+}
+
 func TestFormatDryRun(t *testing.T) {
 	info := dryRunInfo{
 		AppName:    "my-app",

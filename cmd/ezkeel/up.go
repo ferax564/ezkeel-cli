@@ -121,6 +121,14 @@ func applySpec(fr *detect.FrameworkResult, s *spec.Spec) bool {
 	overridden := false
 	if s.Framework != "" {
 		fr.Framework = detect.Framework(s.Framework)
+		// If auto-detect couldn't classify the dir it left Dockerfile
+		// empty. The spec just rescued the framework — make sure the
+		// later "auto" Dockerfile-generation path actually runs instead
+		// of pointing docker build at a non-existent file. Existing
+		// values (e.g. "Dockerfile" or "auto") are preserved.
+		if fr.Dockerfile == "" {
+			fr.Dockerfile = "auto"
+		}
 		overridden = true
 	}
 	if s.Build != "" {
@@ -136,6 +144,21 @@ func applySpec(fr *detect.FrameworkResult, s *spec.Spec) bool {
 		overridden = true
 	}
 	return overridden
+}
+
+// applyServicesFromSpec layers ezkeel.yaml services onto the
+// auto-detected database result. Spec overrides detect when a service
+// engine is explicitly declared so a repo without an importable client
+// dependency (e.g. a Rust app speaking raw libpq) still triggers
+// Postgres provisioning when the spec asks for it.
+func applyServicesFromSpec(detected *detect.DatabaseResult, s *spec.Spec) *detect.DatabaseResult {
+	if s == nil {
+		return detected
+	}
+	if svc, ok := s.Services["db"]; ok && svc.Engine != "" {
+		return &detect.DatabaseResult{Engine: detect.DBEngine(svc.Engine)}
+	}
+	return detected
 }
 
 func runUp(cmd *cobra.Command, args []string) error {
@@ -238,8 +261,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Placed before the FrameworkUnknown gate so an explicit framework
 	// override can rescue a directory the auto-detector cannot classify.
 	overridden := false
+	var loadedSpec *spec.Spec
 	if specPath, ferr := spec.Find(sourceDir); ferr == nil {
-		loadedSpec, lerr := spec.Load(specPath)
+		var lerr error
+		loadedSpec, lerr = spec.Load(specPath)
 		if lerr != nil {
 			model.FailStep(0, lerr.Error())
 			printProgress()
@@ -257,6 +282,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	dbResult := detect.DetectDatabase(sourceDir)
+	dbResult = applyServicesFromSpec(dbResult, loadedSpec)
 
 	model.CompleteStep(0, fmt.Sprintf("detected %s", fr.Framework))
 	printProgress()

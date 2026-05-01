@@ -26,8 +26,10 @@ func TestRunHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(r.calls) != 3 {
-		t.Fatalf("calls = %d, want 3", len(r.calls))
+	// 3 original calls (probe, download, verify) + 5 unconditional Caddy
+	// install steps (network, mkdir, Caddyfile write, compose write, up).
+	if len(r.calls) != 8 {
+		t.Fatalf("calls = %d, want 8", len(r.calls))
 	}
 	if !strings.HasPrefix(r.calls[0], "docker --version") {
 		t.Errorf("call 0 = %q", r.calls[0])
@@ -37,6 +39,9 @@ func TestRunHappyPath(t *testing.T) {
 	}
 	if r.calls[2] != "ezkeel-agent --version" {
 		t.Errorf("call 2 = %q", r.calls[2])
+	}
+	if !strings.Contains(r.calls[7], "docker compose -p ezkeel up -d") {
+		t.Errorf("call 7 = %q, want caddy_up", r.calls[7])
 	}
 }
 
@@ -53,8 +58,9 @@ func TestRunDockerMissingTriggersInstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(r.calls) != 4 {
-		t.Fatalf("calls = %d, want 4 (probe, install, download, verify)", len(r.calls))
+	// 4 original calls (probe, install, download, verify) + 5 Caddy steps.
+	if len(r.calls) != 9 {
+		t.Fatalf("calls = %d, want 9 (probe, install, download, verify, +5 caddy)", len(r.calls))
 	}
 	if !strings.Contains(r.calls[1], "get.docker.com") {
 		t.Errorf("call 1 = %q", r.calls[1])
@@ -109,6 +115,7 @@ func TestSSHArgsDefaults(t *testing.T) {
 		"-p", "22",
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=10",
+		"-o", "StrictHostKeyChecking=accept-new",
 		"root@1.2.3.4",
 		"echo hi",
 	}
@@ -124,6 +131,7 @@ func TestSSHArgsExplicit(t *testing.T) {
 		"-p", "2222",
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=10",
+		"-o", "StrictHostKeyChecking=accept-new",
 		"alice@h",
 		"id",
 	}
@@ -162,7 +170,11 @@ func TestSSHArgsHostKeyOptsOverrideDefaults(t *testing.T) {
 
 func TestAliasArgs(t *testing.T) {
 	got := aliasArgs("my-alias", "uptime")
-	want := []string{"-o", "ConnectTimeout=10", "my-alias", "uptime"}
+	want := []string{
+		"-o", "ConnectTimeout=10",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"my-alias", "uptime",
+	}
 	if !sliceEq(got, want) {
 		t.Errorf("aliasArgs =\n  got  %v\n  want %v", got, want)
 	}
@@ -182,7 +194,17 @@ func sliceEq(a, b []string) bool {
 
 func TestStepsExposed(t *testing.T) {
 	steps := Steps(Options{AgentURL: "https://example/agent"})
-	want := []string{"docker_probe", "docker_install", "agent_download", "agent_verify"}
+	want := []string{
+		"docker_probe",
+		"docker_install",
+		"agent_download",
+		"agent_verify",
+		"ezkeel_apps_network",
+		"platform_dir",
+		"caddyfile_write",
+		"caddy_compose_write",
+		"caddy_up",
+	}
 	if len(steps) != len(want) {
 		t.Fatalf("len = %d, want %d", len(steps), len(want))
 	}
@@ -190,5 +212,21 @@ func TestStepsExposed(t *testing.T) {
 		if s.Name != want[i] {
 			t.Errorf("steps[%d].Name = %q, want %q", i, s.Name, want[i])
 		}
+	}
+}
+
+func TestRunCaddyUpFails(t *testing.T) {
+	r := &fakeRunner{
+		resp: func(i int, cmd string) ([]byte, error) {
+			// Last step (caddy_up) fails.
+			if strings.HasPrefix(cmd, "cd /opt/ezkeel && docker compose") {
+				return []byte("compose error"), errors.New("exit 1")
+			}
+			return nil, nil
+		},
+	}
+	err := Run(context.Background(), r, Options{AgentURL: "https://example/agent"})
+	if err == nil || !strings.Contains(err.Error(), "caddy_up") {
+		t.Fatalf("err = %v", err)
 	}
 }

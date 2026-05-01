@@ -9,8 +9,13 @@ import (
 // SSHRunner shells out via ssh(1). HostKeyOpts is appended BEFORE the
 // runner's defaults so caller-supplied -o flags win on duplicate keys
 // (ssh first-occurrence-wins semantics, per ssh_config(5)). Use
-// HostKeyOpts to override defaults like BatchMode or ConnectTimeout,
-// or to pin a known_hosts file.
+// HostKeyOpts to override defaults like BatchMode, ConnectTimeout, or
+// StrictHostKeyChecking=accept-new, or to pin a known_hosts file.
+//
+// Runner defaults (overridable via HostKeyOpts):
+//   - BatchMode=yes
+//   - ConnectTimeout=10
+//   - StrictHostKeyChecking=accept-new
 type SSHRunner struct {
 	Host        string
 	User        string
@@ -68,7 +73,11 @@ func sshArgs(host, user string, port int, keyFile string, hostKeyOpts []string, 
 	args = append(args, hostKeyOpts...)
 	// Runner defaults LAST so they only apply when the caller did not
 	// supply the same key.
-	args = append(args, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
+	args = append(args,
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=10",
+		"-o", "StrictHostKeyChecking=accept-new",
+	)
 	args = append(args, user+"@"+host, cmd)
 	return args
 }
@@ -79,6 +88,7 @@ func sshArgs(host, user string, port int, keyFile string, hostKeyOpts []string, 
 func aliasArgs(alias, cmd string) []string {
 	return []string{
 		"-o", "ConnectTimeout=10",
+		"-o", "StrictHostKeyChecking=accept-new",
 		alias,
 		cmd,
 	}
