@@ -230,6 +230,49 @@ func TestApplySpec_FrameworkAugmentPreservesDetectedFields(t *testing.T) {
 	}
 }
 
+func TestApplySpec_FrameworkSwitchResetsDefaults(t *testing.T) {
+	// Auto-detect found Vite; spec overrides to express. Vite's start
+	// command must NOT carry over — otherwise the Express container
+	// ships with "npx serve dist" and dies on first launch.
+	fr := &detect.FrameworkResult{
+		Framework:  detect.FrameworkVite,
+		Build:      "npm run build",
+		Start:      "npx serve dist",
+		Port:       5173,
+		Dockerfile: "auto",
+	}
+	applySpec(fr, &spec.Spec{Name: "x", Framework: "express"})
+
+	if fr.Framework != detect.FrameworkExpress {
+		t.Errorf("Framework = %q, want express", fr.Framework)
+	}
+	if fr.Start != "node index.js" {
+		t.Errorf("Start = %q, want node index.js (express default, NOT vite carry-over)", fr.Start)
+	}
+	if fr.Port != 3000 {
+		t.Errorf("Port = %d, want 3000 (express default)", fr.Port)
+	}
+}
+
+func TestApplySpec_SwitchWithExplicitStartUsesExplicit(t *testing.T) {
+	// Switch case + explicit Start in spec — explicit value wins over
+	// both detected and switched defaults.
+	fr := &detect.FrameworkResult{
+		Framework:  detect.FrameworkVite,
+		Start:      "npx serve dist",
+		Port:       5173,
+		Dockerfile: "auto",
+	}
+	applySpec(fr, &spec.Spec{Name: "x", Framework: "express", Start: "node server.js"})
+
+	if fr.Start != "node server.js" {
+		t.Errorf("Start = %q, want explicit spec value", fr.Start)
+	}
+	if fr.Port != 3000 {
+		t.Errorf("Port = %d, want express default after switch", fr.Port)
+	}
+}
+
 func TestApplyServicesFromSpec_OverridesDetect(t *testing.T) {
 	detected := &detect.DatabaseResult{Engine: detect.DBNone}
 	got := applyServicesFromSpec(detected, &spec.Spec{

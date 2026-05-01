@@ -128,22 +128,40 @@ func applySpec(fr *detect.FrameworkResult, s *spec.Spec) bool {
 	overridden := false
 	if s.Framework != "" {
 		fwk := detect.Framework(s.Framework)
-		// Fill blanks from the canonical defaults table. We only fill
-		// fields that are still zero — when the spec rescues a
-		// FrameworkUnknown all three (Build/Start/Port) are blank, and
-		// when it's "augmenting" a successful detect they are already
-		// populated and shouldn't be clobbered.
+
+		// Identify the change shape:
+		//   - rescue: auto-detect was empty/Unknown → fill from defaults
+		//   - switch: auto-detect found a different framework → replace
+		//     detected defaults wholesale (otherwise the new framework
+		//     inherits the old framework's Build/Start/Port — e.g. a
+		//     Vite-detected repo with `framework: express` would still
+		//     ship with "npx serve dist" inside an Express container)
+		//   - augment: spec framework == detected framework → leave
+		//     detected defaults alone, spec's explicit fields below win
+		rescue := fr.Framework == "" || fr.Framework == detect.FrameworkUnknown
+		isSwitch := !rescue && fr.Framework != fwk
+
 		if defaults, ok := detect.DefaultsFor(fwk); ok {
-			if fr.Build == "" {
+			if isSwitch {
+				// Wholesale replace — defaults belong to the spec's
+				// framework now.
 				fr.Build = defaults.Build
-			}
-			if fr.Start == "" {
 				fr.Start = defaults.Start
-			}
-			if fr.Port == 0 {
 				fr.Port = defaults.Port
+			} else {
+				// rescue or augment: only fill blanks.
+				if fr.Build == "" {
+					fr.Build = defaults.Build
+				}
+				if fr.Start == "" {
+					fr.Start = defaults.Start
+				}
+				if fr.Port == 0 {
+					fr.Port = defaults.Port
+				}
 			}
 		}
+
 		fr.Framework = fwk
 		// If auto-detect couldn't classify the dir it left Dockerfile
 		// empty. The spec just rescued the framework — make sure the
