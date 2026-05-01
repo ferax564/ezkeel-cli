@@ -263,6 +263,84 @@ func TestApplyServicesFromSpec_NilSpecNoop(t *testing.T) {
 	}
 }
 
+func TestValidateSpecFramework_RejectsCommonTypos(t *testing.T) {
+	// `framework: nodejs` is a common copy-paste from the comment in
+	// templates/ezkeel.yaml. Without validation, applySpec sets a
+	// non-empty Framework and the FrameworkUnknown gate inside runUp
+	// silently passes — failure surfaces much later in dockerfile
+	// generation as "no Dockerfile template for framework nodejs".
+	typos := []string{"nodejs", "node", "Node", "rust-lang", "express.js"}
+	for _, name := range typos {
+		err := validateSpecFramework(&spec.Spec{Name: "x", Framework: name})
+		if err == nil {
+			t.Errorf("validateSpecFramework(%q) returned nil, want unsupported-framework error", name)
+		}
+	}
+}
+
+func TestValidateSpecFramework_AcceptsKnown(t *testing.T) {
+	known := []string{"go", "rust", "express", "nextjs", "fastapi"}
+	for _, name := range known {
+		if err := validateSpecFramework(&spec.Spec{Name: "x", Framework: name}); err != nil {
+			t.Errorf("validateSpecFramework(%q) = %v, want nil", name, err)
+		}
+	}
+}
+
+func TestValidateSpecFramework_NilAndEmpty(t *testing.T) {
+	if err := validateSpecFramework(nil); err != nil {
+		t.Errorf("validateSpecFramework(nil) = %v, want nil", err)
+	}
+	if err := validateSpecFramework(&spec.Spec{Name: "x"}); err != nil {
+		t.Errorf("validateSpecFramework(empty framework) = %v, want nil (auto-detect path)", err)
+	}
+}
+
+func TestResolveAppName_FlagWins(t *testing.T) {
+	got := resolveAppName("flag-name", "https://x.com/y/repo", "/dir", &spec.Spec{Name: "spec-name"})
+	if got != "flag-name" {
+		t.Errorf("got %q, want flag-name", got)
+	}
+}
+
+func TestResolveAppName_SpecBeatsRepo(t *testing.T) {
+	got := resolveAppName("", "https://x.com/y/repo", "/dir", &spec.Spec{Name: "spec-name"})
+	if got != "spec-name" {
+		t.Errorf("got %q, want spec-name", got)
+	}
+}
+
+func TestResolveAppName_RepoBeatsDir(t *testing.T) {
+	got := resolveAppName("", "https://x.com/y/repo-name", "/path/dir-name", nil)
+	if got != "repo-name" {
+		t.Errorf("got %q, want repo-name", got)
+	}
+}
+
+func TestResolveAppName_DirFallback(t *testing.T) {
+	got := resolveAppName("", "", "/path/to/myapp", nil)
+	if got != "myapp" {
+		t.Errorf("got %q, want myapp", got)
+	}
+}
+
+func TestResolveAppName_NilSpec(t *testing.T) {
+	got := resolveAppName("", "https://x.com/y/repo", "/dir", nil)
+	if got != "repo" {
+		t.Errorf("got %q, want repo", got)
+	}
+}
+
+func TestResolveAppName_EmptySpecNameFallsThrough(t *testing.T) {
+	// A Spec with empty Name should fall through to the repo URL,
+	// not return "". (Defensive — spec.Load enforces Name != "" but
+	// callers might construct Spec literals.)
+	got := resolveAppName("", "https://x.com/y/repo", "/dir", &spec.Spec{})
+	if got != "repo" {
+		t.Errorf("got %q, want repo", got)
+	}
+}
+
 func TestFormatDryRun(t *testing.T) {
 	info := dryRunInfo{
 		AppName:    "my-app",

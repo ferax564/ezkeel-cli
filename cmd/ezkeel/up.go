@@ -170,6 +170,48 @@ func applySpec(fr *detect.FrameworkResult, s *spec.Spec) bool {
 	return overridden
 }
 
+// validateSpecFramework rejects ezkeel.yaml `framework:` values that
+// don't appear in the canonical defaults table. Without this gate, a
+// typo like `framework: nodejs` would silently pass the
+// FrameworkUnknown check inside runUp (because applySpec sets a
+// non-empty value) and then fail much later in
+// detect.GenerateDockerfile with "no Dockerfile template for
+// framework nodejs". Catching the typo at spec-load time produces a
+// clearer error pointing the user at the supported list.
+//
+// Returns nil for an unset framework field — the auto-detect path
+// handles that case downstream.
+func validateSpecFramework(s *spec.Spec) error {
+	if s == nil || s.Framework == "" {
+		return nil
+	}
+	if _, ok := detect.DefaultsFor(detect.Framework(s.Framework)); !ok {
+		return fmt.Errorf("unsupported framework %q; run `ezkeel up --help` for the supported list, or remove the framework: line to use auto-detect", s.Framework)
+	}
+	return nil
+}
+
+// resolveAppName picks the deployment app name from the highest-priority
+// source. Priority: --name flag > spec.Name > repo URL basename >
+// source-directory basename.
+//
+// Promoting spec.Name above the repo/dir fallbacks lets the spec's
+// required `name` field actually control deployment identity — without
+// this hoist, `name: api-server` in ezkeel.yaml would lose to the
+// repo's directory name on every deploy.
+func resolveAppName(nameFlag, repoURL, sourceDir string, s *spec.Spec) string {
+	if nameFlag != "" {
+		return nameFlag
+	}
+	if s != nil && s.Name != "" {
+		return s.Name
+	}
+	if repoURL != "" {
+		return appNameFromRepo(repoURL)
+	}
+	return appNameFromDir(sourceDir)
+}
+
 // applyServicesFromSpec layers ezkeel.yaml services onto the
 // auto-detected database result. Spec overrides detect when a service
 // engine is explicitly declared so a repo without an importable client
@@ -243,14 +285,26 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Step 3: Determine app name
-	appName := nameFlag
-	if appName == "" && repoURL != "" {
-		appName = appNameFromRepo(repoURL)
+	// Load ezkeel.yaml (if any) before resolving app name so spec.Name
+	// can win over the repo/dir fallback. This also lets us reject an
+	// unsupported `framework:` value before the TUI starts —
+	// validation here means a clear plain-error instead of a
+	// misleading "no Dockerfile template" failure deep in the build
+	// step. The spec is then re-used inside Step 0 by applySpec.
+	var loadedSpec *spec.Spec
+	if specPath, ferr := spec.Find(sourceDir); ferr == nil {
+		s, lerr := spec.Load(specPath)
+		if lerr != nil {
+			return fmt.Errorf("loading %s: %w", specPath, lerr)
+		}
+		if verr := validateSpecFramework(s); verr != nil {
+			return fmt.Errorf("%s: %w", specPath, verr)
+		}
+		loadedSpec = s
 	}
-	if appName == "" {
-		appName = appNameFromDir(sourceDir)
-	}
+
+	// Step 3: Determine app name (--name > spec.Name > repo > dir)
+	appName := resolveAppName(nameFlag, repoURL, sourceDir, loadedSpec)
 
 	// Step 4: Set up deploy model and steps
 	stepLabels := []string{
@@ -288,22 +342,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("detecting framework in %s: %w\n\nhint: pass a repo URL with `ezkeel up <repo-url>` or run from the project root", sourceDir, err)
 	}
 
-	// Layer in ezkeel.yaml overrides if present in the source dir.
-	// Placed before the FrameworkUnknown gate so an explicit framework
-	// override can rescue a directory the auto-detector cannot classify.
-	overridden := false
-	var loadedSpec *spec.Spec
-	if specPath, ferr := spec.Find(sourceDir); ferr == nil {
-		var lerr error
-		loadedSpec, lerr = spec.Load(specPath)
-		if lerr != nil {
-			model.FailStep(0, lerr.Error())
-			printProgress()
-			printStep(tui.IconFail, "load ezkeel.yaml: "+lerr.Error())
-			return fmt.Errorf("loading %s: %w", specPath, lerr)
-		}
-		overridden = applySpec(fr, loadedSpec)
-	}
+	// Layer in ezkeel.yaml overrides if present. The spec was already
+	// loaded + validated above (before TUI start), so applySpec just
+	// takes the parsed value. Placed before the FrameworkUnknown gate
+	// so an explicit framework override can rescue a directory the
+	// auto-detector cannot classify.
+	overridden := applySpec(fr, loadedSpec)
 
 	if fr.Framework == detect.FrameworkUnknown {
 		model.FailStep(0, "unknown framework")

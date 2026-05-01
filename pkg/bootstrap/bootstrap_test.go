@@ -225,6 +225,28 @@ func TestMinimalCaddyfileAllowsAdminReload(t *testing.T) {
 	}
 }
 
+func TestCaddyfileWriteIsIdempotent(t *testing.T) {
+	// `ezkeel server add` is now bootstrap-by-default. Re-running it
+	// against an already-deployed host (e.g. to update the domain)
+	// must NOT clobber the per-app reverse_proxy blocks that
+	// `ezkeel up` has appended to /opt/ezkeel/Caddyfile. Guard via
+	// `test -f` so subsequent runs are a no-op.
+	cmd := caddyfileWriteCmd()
+	if !strings.HasPrefix(cmd, "test -f /opt/ezkeel/Caddyfile ||") {
+		t.Errorf("caddyfile write must be idempotent (test -f guard); got: %q", cmd)
+	}
+}
+
+func TestCaddyComposeWriteIsIdempotent(t *testing.T) {
+	// Same rationale as TestCaddyfileWriteIsIdempotent — bootstrap
+	// is default-on, so we must not overwrite a hand-edited
+	// compose.yml on every re-run.
+	cmd := caddyComposeWriteCmd()
+	if !strings.HasPrefix(cmd, "test -f /opt/ezkeel/compose.yml ||") {
+		t.Errorf("compose write must be idempotent (test -f guard); got: %q", cmd)
+	}
+}
+
 func TestRunCaddyUpFails(t *testing.T) {
 	r := &fakeRunner{
 		resp: func(i int, cmd string) ([]byte, error) {

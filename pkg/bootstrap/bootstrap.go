@@ -85,14 +85,32 @@ func (o Options) agentURL() string {
 // caddyfileWriteCmd returns the heredoc shell command that writes the
 // minimal Caddyfile to /opt/ezkeel/Caddyfile. Single-quoted heredoc
 // delimiter prevents shell expansion of the body.
+//
+// Guarded by `test -f` so re-running `ezkeel server add` against an
+// already-bootstrapped host (e.g. to update the platform domain) does
+// not clobber the per-app reverse_proxy blocks that `ezkeel up`
+// appended after the initial bootstrap. With `--bootstrap` default-on
+// this is a hard requirement: an unconditional cat would wipe every
+// running app's route on the next reload.
 func caddyfileWriteCmd() string {
-	return fmt.Sprintf("cat > /opt/ezkeel/Caddyfile <<'EZKEELEOF'\n%sEZKEELEOF", minimalCaddyfile)
+	return fmt.Sprintf(
+		"test -f /opt/ezkeel/Caddyfile || cat > /opt/ezkeel/Caddyfile <<'EZKEELEOF'\n%sEZKEELEOF",
+		minimalCaddyfile,
+	)
 }
 
 // caddyComposeWriteCmd returns the heredoc shell command that writes
 // the minimal Caddy compose stack to /opt/ezkeel/compose.yml.
+//
+// Guarded by `test -f` so re-running bootstrap leaves any
+// hand-edited compose customisations intact. `docker compose up -d`
+// downstream is idempotent either way; this guard avoids surprising
+// the user when they have tweaked the file.
 func caddyComposeWriteCmd() string {
-	return fmt.Sprintf("cat > /opt/ezkeel/compose.yml <<'EZKEELEOF'\n%sEZKEELEOF", minimalCaddyCompose)
+	return fmt.Sprintf(
+		"test -f /opt/ezkeel/compose.yml || cat > /opt/ezkeel/compose.yml <<'EZKEELEOF'\n%sEZKEELEOF",
+		minimalCaddyCompose,
+	)
 }
 
 // Steps returns the bootstrap command sequence with stable names. The
