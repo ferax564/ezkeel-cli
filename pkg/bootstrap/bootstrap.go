@@ -82,6 +82,18 @@ func (o Options) agentURL() string {
 	return DefaultAgentURL
 }
 
+// shellQuote single-quotes s for safe substitution into a remote shell
+// command string. Single quotes inside s are escaped via the '\''
+// idiom (close quote, escaped quote, reopen quote).
+//
+// Rationale: AgentURL may carry presigned-asset query strings whose
+// `&` characters would otherwise be parsed by the remote login shell
+// as backgrounding operators, splitting curl off from the rest of the
+// command and racing chmod against an unfinished download.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // caddyfileWriteCmd returns the heredoc shell command that writes the
 // minimal Caddyfile to /opt/ezkeel/Caddyfile. Single-quoted heredoc
 // delimiter prevents shell expansion of the body.
@@ -125,7 +137,7 @@ func Steps(opts Options) []Step {
 		{Name: "docker_install", Cmd: "curl -fsSL https://get.docker.com | sh"},
 		{Name: "agent_download", Cmd: fmt.Sprintf(
 			"curl -fsSL -o /usr/local/bin/ezkeel-agent %s && chmod +x /usr/local/bin/ezkeel-agent",
-			url,
+			shellQuote(url),
 		)},
 		{Name: "agent_verify", Cmd: "ezkeel-agent --version"},
 		{Name: "ezkeel_apps_network", Cmd: "docker network inspect ezkeel-apps >/dev/null 2>&1 || docker network create ezkeel-apps"},

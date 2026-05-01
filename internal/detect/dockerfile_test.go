@@ -74,8 +74,10 @@ func TestGenerateDockerfile_FastAPI(t *testing.T) {
 
 func TestGenerateDockerfile_Go(t *testing.T) {
 	fr := &FrameworkResult{
-		Framework:  FrameworkGo,
-		Build:      "go build ./...",
+		Framework: FrameworkGo,
+		// Mirror the canonical default — the build must produce a binary
+		// at /app/app for the runner stage's COPY to find it.
+		Build:      "go build -o /app/app ./...",
 		Start:      "./app",
 		Port:       8080,
 		Dockerfile: "auto",
@@ -86,6 +88,7 @@ func TestGenerateDockerfile_Go(t *testing.T) {
 		"FROM golang:",
 		"CGO_ENABLED=0",
 		"EXPOSE 8080",
+		"go build -o /app/app",
 	}
 	for _, want := range checks {
 		if !strings.Contains(got, want) {
@@ -159,9 +162,10 @@ func TestGenerateDockerfile_ExistingDockerfile(t *testing.T) {
 
 func TestGenerateDockerfile_Rust(t *testing.T) {
 	fr := &FrameworkResult{
-		Framework:  FrameworkRust,
-		Build:      "cargo build --release",
-		Start:      "./target/release/app",
+		Framework: FrameworkRust,
+		Build:     "cargo build --release",
+		// Default Start references the runner-stage path /app/app.
+		Start:      "./app",
 		Port:       8080,
 		Dockerfile: "auto",
 	}
@@ -221,5 +225,101 @@ func TestGenerateDockerfile_Remix(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("Remix Dockerfile missing %q\nGot:\n%s", want, got)
 		}
+	}
+}
+
+// TestGenerateDockerfile_HonorsGoBuildOverride verifies that a custom
+// Build/Start in the spec actually flows through to the generated Go
+// Dockerfile. Before this fix, the template hardcoded `RUN go build -o
+// app ./...` and `CMD ["./app"]` regardless of fr.Build / fr.Start, so
+// `ezkeel up --dry-run` showed the override but the produced image did
+// not.
+func TestGenerateDockerfile_HonorsGoBuildOverride(t *testing.T) {
+	fr := &FrameworkResult{
+		Framework:  FrameworkGo,
+		Build:      "go build -tags=embed -o /app/app ./cmd/server",
+		Start:      "/app/app --port 9000",
+		Port:       9000,
+		Dockerfile: "auto",
+	}
+	got := GenerateDockerfile(fr)
+	if !strings.Contains(got, "go build -tags=embed -o /app/app ./cmd/server") {
+		t.Errorf("Go Dockerfile missing custom Build override:\n%s", got)
+	}
+	if !strings.Contains(got, `"/app/app", "--port", "9000"`) {
+		t.Errorf("Go Dockerfile missing custom Start override (CMD JSON):\n%s", got)
+	}
+	if !strings.Contains(got, "EXPOSE 9000") {
+		t.Errorf("Go Dockerfile missing EXPOSE 9000:\n%s", got)
+	}
+}
+
+// TestGenerateDockerfile_HonorsRustBuildOverride mirrors the Go test
+// for the Rust template. A user-specified Build that, e.g., enables a
+// release feature flag must reach the RUN step.
+func TestGenerateDockerfile_HonorsRustBuildOverride(t *testing.T) {
+	fr := &FrameworkResult{
+		Framework:  FrameworkRust,
+		Build:      "cargo build --release --features prod",
+		Start:      "./app --bind 0.0.0.0:9000",
+		Port:       9000,
+		Dockerfile: "auto",
+	}
+	got := GenerateDockerfile(fr)
+	if !strings.Contains(got, "cargo build --release --features prod") {
+		t.Errorf("Rust Dockerfile missing custom Build override:\n%s", got)
+	}
+	if !strings.Contains(got, `"./app", "--bind", "0.0.0.0:9000"`) {
+		t.Errorf("Rust Dockerfile missing custom Start override (CMD JSON):\n%s", got)
+	}
+}
+
+// TestGenerateDockerfile_HonorsNextjsBuildOverride covers the Next.js
+// template. CMD stays hardcoded (standalone-output convention) but the
+// build step must respect overrides — e.g. `pnpm build` or
+// `npm run build:prod`.
+func TestGenerateDockerfile_HonorsNextjsBuildOverride(t *testing.T) {
+	fr := &FrameworkResult{
+		Framework:  FrameworkNextjs,
+		Build:      "pnpm build",
+		Start:      "node server.js",
+		Port:       3000,
+		Dockerfile: "auto",
+	}
+	got := GenerateDockerfile(fr)
+	if !strings.Contains(got, "RUN pnpm build") {
+		t.Errorf("Next.js Dockerfile missing custom Build override:\n%s", got)
+	}
+}
+
+// TestGenerateDockerfile_HonorsViteBuildOverride covers the SPA bundler
+// template (Vite).
+func TestGenerateDockerfile_HonorsViteBuildOverride(t *testing.T) {
+	fr := &FrameworkResult{
+		Framework:  FrameworkVite,
+		Build:      "pnpm build",
+		Start:      "npx serve dist",
+		Port:       5173,
+		Dockerfile: "auto",
+	}
+	got := GenerateDockerfile(fr)
+	if !strings.Contains(got, "RUN pnpm build") {
+		t.Errorf("Vite Dockerfile missing custom Build override:\n%s", got)
+	}
+}
+
+// TestGenerateDockerfile_HonorsRemixBuildOverride covers the Node SSR
+// template (Remix/Nuxt/Astro share it).
+func TestGenerateDockerfile_HonorsRemixBuildOverride(t *testing.T) {
+	fr := &FrameworkResult{
+		Framework:  FrameworkRemix,
+		Build:      "pnpm build",
+		Start:      "node ./build/server/index.js",
+		Port:       3000,
+		Dockerfile: "auto",
+	}
+	got := GenerateDockerfile(fr)
+	if !strings.Contains(got, "RUN pnpm build") {
+		t.Errorf("Node SSR Dockerfile missing custom Build override:\n%s", got)
 	}
 }

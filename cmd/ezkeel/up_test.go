@@ -182,8 +182,8 @@ func TestApplySpec_FrameworkOnlyFillsDefaults(t *testing.T) {
 	if fr.Build != "cargo build --release" {
 		t.Errorf("Build = %q, want cargo build --release", fr.Build)
 	}
-	if fr.Start != "./target/release/app" {
-		t.Errorf("Start = %q, want ./target/release/app", fr.Start)
+	if fr.Start != "./app" {
+		t.Errorf("Start = %q, want ./app", fr.Start)
 	}
 	if fr.Port != 8080 {
 		t.Errorf("Port = %d, want 8080", fr.Port)
@@ -201,7 +201,9 @@ func TestApplySpec_ExplicitOverridesDefaults(t *testing.T) {
 		t.Errorf("Port = %d, want 9999 (explicit override)", fr.Port)
 	}
 	// Start was not explicitly set, so the default carries through.
-	if fr.Start != "./target/release/app" {
+	// (Default Start for Rust references the runner-stage path /app/app,
+	// not the builder-stage target/release/app.)
+	if fr.Start != "./app" {
 		t.Errorf("Start = %q, want default carry-over", fr.Start)
 	}
 }
@@ -338,6 +340,55 @@ func TestResolveAppName_EmptySpecNameFallsThrough(t *testing.T) {
 	got := resolveAppName("", "https://x.com/y/repo", "/dir", &spec.Spec{})
 	if got != "repo" {
 		t.Errorf("got %q, want repo", got)
+	}
+}
+
+func TestResolveResources_FlagWins(t *testing.T) {
+	m, c := resolveResources("1g", "2.0", &spec.Spec{
+		Resources: spec.Resources{Memory: "512m", CPUs: "1.0"},
+	})
+	if m != "1g" || c != "2.0" {
+		t.Errorf("got mem=%q cpu=%q; want flag values 1g/2.0", m, c)
+	}
+}
+
+func TestResolveResources_SpecFillsBlanks(t *testing.T) {
+	m, c := resolveResources("", "", &spec.Spec{
+		Resources: spec.Resources{Memory: "512m", CPUs: "1.0"},
+	})
+	if m != "512m" || c != "1.0" {
+		t.Errorf("got mem=%q cpu=%q; want spec values 512m/1.0", m, c)
+	}
+}
+
+func TestResolveResources_PartialFlag(t *testing.T) {
+	m, c := resolveResources("2g", "", &spec.Spec{
+		Resources: spec.Resources{Memory: "512m", CPUs: "1.0"},
+	})
+	if m != "2g" || c != "1.0" {
+		t.Errorf("got mem=%q cpu=%q; want 2g/1.0 (flag wins for memory, spec fills cpus)", m, c)
+	}
+}
+
+func TestResolveResources_NilSpec(t *testing.T) {
+	m, c := resolveResources("", "", nil)
+	if m != "" || c != "" {
+		t.Errorf("got mem=%q cpu=%q; want empty", m, c)
+	}
+}
+
+func TestResolveResources_NilSpecPreservesFlags(t *testing.T) {
+	m, c := resolveResources("1g", "0.5", nil)
+	if m != "1g" || c != "0.5" {
+		t.Errorf("got mem=%q cpu=%q; want flag pass-through 1g/0.5", m, c)
+	}
+}
+
+func TestResolveResources_EmptySpecResources(t *testing.T) {
+	// Spec with no resources block should behave like nil for resources.
+	m, c := resolveResources("", "", &spec.Spec{Name: "x"})
+	if m != "" || c != "" {
+		t.Errorf("got mem=%q cpu=%q; want empty (spec has no resources)", m, c)
 	}
 }
 

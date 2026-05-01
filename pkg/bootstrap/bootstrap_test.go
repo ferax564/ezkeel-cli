@@ -247,6 +247,42 @@ func TestCaddyComposeWriteIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestShellQuoteSimple(t *testing.T) {
+	got := shellQuote("https://example.com/foo?a=1&b=2")
+	want := `'https://example.com/foo?a=1&b=2'`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestShellQuoteWithSingleQuote(t *testing.T) {
+	got := shellQuote(`a'b`)
+	want := `'a'\''b'`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestStepsExposed_AgentDownloadIsQuoted(t *testing.T) {
+	// AgentURL with `&` query params must be single-quoted so the remote
+	// login shell doesn't treat `&` as a backgrounding operator and split
+	// curl off from chmod.
+	steps := Steps(Options{AgentURL: "https://x.example/path?a=1&b=2"})
+	var dl Step
+	for _, s := range steps {
+		if s.Name == "agent_download" {
+			dl = s
+			break
+		}
+	}
+	if dl.Cmd == "" {
+		t.Fatal("agent_download step missing from Steps()")
+	}
+	if !strings.Contains(dl.Cmd, `'https://x.example/path?a=1&b=2'`) {
+		t.Errorf("agent_download URL must be single-quoted; got: %q", dl.Cmd)
+	}
+}
+
 func TestRunCaddyUpFails(t *testing.T) {
 	r := &fakeRunner{
 		resp: func(i int, cmd string) ([]byte, error) {

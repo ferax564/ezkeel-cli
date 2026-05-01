@@ -212,6 +212,28 @@ func resolveAppName(nameFlag, repoURL, sourceDir string, s *spec.Spec) string {
 	return appNameFromDir(sourceDir)
 }
 
+// resolveResources picks resource limits from highest priority: the
+// --memory / --cpus flags > ezkeel.yaml resources block > unset (no
+// limits). Each field is resolved independently so a partial spec
+// (memory only) plus a partial flag (cpus only) cleanly composes.
+//
+// Without this hoist, spec.Resources is parsed but discarded and a
+// scaffolded `resources.memory: 512m` is silently ignored — the deploy
+// runs uncapped unless the user also passes --memory on the CLI.
+func resolveResources(memFlag, cpuFlag string, s *spec.Spec) (mem, cpu string) {
+	mem, cpu = memFlag, cpuFlag
+	if s == nil {
+		return
+	}
+	if mem == "" && s.Resources.Memory != "" {
+		mem = s.Resources.Memory
+	}
+	if cpu == "" && s.Resources.CPUs != "" {
+		cpu = s.Resources.CPUs
+	}
+	return
+}
+
 // applyServicesFromSpec layers ezkeel.yaml services onto the
 // auto-detected database result. Spec overrides detect when a service
 // engine is explicitly declared so a repo without an importable client
@@ -449,8 +471,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	client := clientFromServer(srv)
 	deployPort := appPort(fr.Port)
-	memoryLimit, _ := cmd.Flags().GetString("memory")
-	cpuLimit, _ := cmd.Flags().GetString("cpus")
+	memFlag, _ := cmd.Flags().GetString("memory")
+	cpuFlag, _ := cmd.Flags().GetString("cpus")
+	memoryLimit, cpuLimit := resolveResources(memFlag, cpuFlag, loadedSpec)
 
 	// Push image to server
 	printStep(tui.IconActive, "pushing image to "+srv.Name+"...")

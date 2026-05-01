@@ -89,8 +89,13 @@ func DetectFramework(dir string) (*FrameworkResult, error) {
 	// 4. Go via go.mod
 	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 		return &FrameworkResult{
-			Framework:  FrameworkGo,
-			Build:      "go build ./...",
+			Framework: FrameworkGo,
+			// Output to /app/app so the runner stage's
+			// COPY --from=builder /app/app /app/app finds the binary
+			// regardless of the source package layout. Without an explicit
+			// `-o`, `go build ./...` lands the binary at `/app/<pkg>`,
+			// which the COPY can't anticipate.
+			Build:      "go build -o /app/app ./...",
 			Start:      "./app",
 			Port:       8080,
 			Dockerfile: "auto",
@@ -100,9 +105,13 @@ func DetectFramework(dir string) (*FrameworkResult, error) {
 	// 5. Rust via Cargo.toml
 	if _, err := os.Stat(filepath.Join(dir, "Cargo.toml")); err == nil {
 		return &FrameworkResult{
-			Framework:  FrameworkRust,
-			Build:      "cargo build --release",
-			Start:      "./target/release/app",
+			Framework: FrameworkRust,
+			Build:     "cargo build --release",
+			// Start references the runner-stage path. The Dockerfile's
+			// COPY moves target/release/<crate> to /app/app, so the
+			// runner CMD invokes ./app — not ./target/release/app, which
+			// only exists in the builder stage.
+			Start:      "./app",
 			Port:       8080,
 			Dockerfile: "auto",
 		}, nil
@@ -314,9 +323,9 @@ func containsWord(text, word string) bool {
 func DefaultsFor(framework Framework) (*FrameworkResult, bool) {
 	switch framework {
 	case FrameworkGo:
-		return &FrameworkResult{Framework: framework, Build: "go build ./...", Start: "./app", Port: 8080, Dockerfile: "auto"}, true
+		return &FrameworkResult{Framework: framework, Build: "go build -o /app/app ./...", Start: "./app", Port: 8080, Dockerfile: "auto"}, true
 	case FrameworkRust:
-		return &FrameworkResult{Framework: framework, Build: "cargo build --release", Start: "./target/release/app", Port: 8080, Dockerfile: "auto"}, true
+		return &FrameworkResult{Framework: framework, Build: "cargo build --release", Start: "./app", Port: 8080, Dockerfile: "auto"}, true
 	case FrameworkStatic:
 		return &FrameworkResult{Framework: framework, Port: 80, Dockerfile: "auto"}, true
 	case FrameworkNextjs:

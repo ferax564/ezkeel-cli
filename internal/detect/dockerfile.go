@@ -35,7 +35,16 @@ func GenerateDockerfile(fr *FrameworkResult) string {
 
 // generateNextjsDockerfile produces a 3-stage Dockerfile for Next.js apps
 // that use output: 'standalone'.
+//
+// Note: only the BUILD step is parameterized via fr.Build. CMD stays
+// hardcoded to `node server.js` because that path is dictated by the
+// standalone-output runner stage layout — overriding it via spec.start
+// would point at a path that doesn't exist on the runner image.
 func generateNextjsDockerfile(fr *FrameworkResult) string {
+	build := fr.Build
+	if build == "" {
+		build = "npm run build"
+	}
 	return fmt.Sprintf(`FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
@@ -45,7 +54,7 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN npm run build
+RUN %s
 
 FROM node:22-alpine AS runner
 WORKDIR /app
@@ -55,24 +64,32 @@ COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 EXPOSE %d
 CMD ["node", "server.js"]
-`, fr.Port)
+`, build, fr.Port)
 }
 
 // generateSPADockerfile produces a 2-stage Dockerfile for SPA bundlers
 // (e.g. Vite) that output to an outDir such as "dist".
+//
+// Note: only the BUILD step is parameterized via fr.Build. CMD stays
+// hardcoded to caddy file-server because the runner image is Caddy and
+// the static asset path is fixed at /srv.
 func generateSPADockerfile(fr *FrameworkResult, outDir string) string {
+	build := fr.Build
+	if build == "" {
+		build = "npm run build"
+	}
 	return fmt.Sprintf(`FROM node:22-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci
 COPY . .
-RUN npm run build
+RUN %s
 
 FROM caddy:2-alpine AS runner
 COPY --from=builder /app/%s /srv
 EXPOSE 80
 CMD ["caddy", "file-server", "--root", "/srv"]
-`, outDir)
+`, build, outDir)
 }
 
 // generateNodeServerDockerfile produces a single-stage Dockerfile for
@@ -89,8 +106,13 @@ CMD [%s]
 }
 
 // generateNodeSSRDockerfile produces a 3-stage Dockerfile for SSR Node.js
-// meta-frameworks (Remix, Nuxt, Astro).
+// meta-frameworks (Remix, Nuxt, Astro). Honors fr.Build and fr.Start so
+// spec overrides flow through.
 func generateNodeSSRDockerfile(fr *FrameworkResult) string {
+	build := fr.Build
+	if build == "" {
+		build = "npm run build"
+	}
 	return fmt.Sprintf(`FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
@@ -100,7 +122,7 @@ FROM node:22-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN npm run build
+RUN %s
 
 FROM node:22-alpine AS runner
 WORKDIR /app
@@ -109,7 +131,7 @@ COPY --from=builder /app ./
 RUN npm ci --omit=dev
 EXPOSE %d
 CMD [%s]
-`, fr.Port, shellToCMD(fr.Start))
+`, build, fr.Port, shellToCMD(fr.Start))
 }
 
 // generatePythonDockerfile produces a Dockerfile for Python frameworks
@@ -130,36 +152,65 @@ CMD [%s]
 }
 
 // generateGoDockerfile produces a 2-stage Dockerfile for Go applications.
+//
+// Convention: the build command must produce a binary at /app/app so
+// the runner stage's COPY --from=builder /app/app /app/app finds it.
+// The default Build (DefaultsFor(FrameworkGo)) uses `-o /app/app`. Custom
+// spec build commands should follow the same convention.
 func generateGoDockerfile(fr *FrameworkResult) string {
+	build := fr.Build
+	if build == "" {
+		build = "go build -o /app/app ./..."
+	}
+	cmd := shellToCMD(fr.Start)
+	if cmd == "" {
+		cmd = `"./app"`
+	}
 	return fmt.Sprintf(`FROM golang:1.23-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
 ENV CGO_ENABLED=0
-RUN go build -o app ./...
+RUN %s
 
 FROM alpine:latest AS runner
 WORKDIR /app
-COPY --from=builder /app/app .
+COPY --from=builder /app/app /app/app
 EXPOSE %d
-CMD ["./app"]
-`, fr.Port)
+CMD [%s]
+`, build, fr.Port, cmd)
 }
 
 // generateRustDockerfile produces a 2-stage Dockerfile for Rust applications.
+//
+// Convention: the build step must leave a binary at
+// /app/target/release/app — i.e. the crate must be named "app", or the
+// spec must override Build with a command that produces that path
+// (e.g. `cargo build --release && cp target/release/<crate> target/release/app`).
+// The runner stage's COPY then moves it to /app/app, and Start = "./app"
+// invokes it. Users with a differently-named binary should override
+// both build: and start: in ezkeel.yaml.
 func generateRustDockerfile(fr *FrameworkResult) string {
+	build := fr.Build
+	if build == "" {
+		build = "cargo build --release"
+	}
+	cmd := shellToCMD(fr.Start)
+	if cmd == "" {
+		cmd = `"./app"`
+	}
 	return fmt.Sprintf(`FROM rust:1.80-slim AS builder
 WORKDIR /app
 COPY . .
-RUN cargo build --release
+RUN %s
 
 FROM debian:bookworm-slim AS runner
 WORKDIR /app
-COPY --from=builder /app/target/release/app .
+COPY --from=builder /app/target/release/app /app/app
 EXPOSE %d
-CMD ["./app"]
-`, fr.Port)
+CMD [%s]
+`, build, fr.Port, cmd)
 }
 
 // generateRailsDockerfile produces a Dockerfile for Ruby on Rails applications.
