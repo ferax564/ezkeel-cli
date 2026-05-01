@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/ferax564/ezkeel-cli/pkg/agent"
 	"github.com/ferax564/ezkeel-cli/internal/config"
+	"github.com/ferax564/ezkeel-cli/pkg/bootstrap"
 	hetznerPkg "github.com/ferax564/ezkeel-cli/pkg/hetzner"
 	"github.com/spf13/cobra"
 )
@@ -30,9 +32,14 @@ var serverAddCmd = &cobra.Command{
 		user, _ := cmd.Flags().GetString("user")
 		key, _ := cmd.Flags().GetString("key")
 		sshAlias, _ := cmd.Flags().GetString("ssh-alias")
+		bootstrapFlag, _ := cmd.Flags().GetBool(bootstrapFlagName)
 
 		if domain == "" {
 			return fmt.Errorf("--domain is required")
+		}
+
+		if useHetzner && cmd.Flags().Changed(bootstrapFlagName) && !bootstrapFlag {
+			return fmt.Errorf("--hetzner provisions a fresh VPS that requires bootstrap; remove --bootstrap=false")
 		}
 
 		if useHetzner {
@@ -65,21 +72,42 @@ var serverAddCmd = &cobra.Command{
 			fmt.Printf("Server created: %s (ID: %d)\n", host, result.Server.ID)
 
 			// Wait for server to be running.
-			fmt.Print("Waiting for server to be ready...")
-			serverReady := false
+			fmt.Print("Waiting for server to boot...")
+			ipKnown := false
 			for i := 0; i < 30; i++ {
 				status, getErr := hc.GetServer(result.Server.ID)
 				if getErr == nil && status.Server.Status == "running" {
-					fmt.Println(" ready!")
-					serverReady = true
+					fmt.Println(" booted!")
+					ipKnown = true
 					break
 				}
 				time.Sleep(2 * time.Second)
 				fmt.Print(".")
 			}
-			if !serverReady {
+			if !ipKnown {
 				fmt.Println(" warning: server may not be ready yet, check Hetzner console")
 			}
+
+			// TCP-connect-only probe is sufficient on Hetzner: cloud-init
+			// opens port 22 ONLY after injecting authorized_keys, so a
+			// successful connect implies the auth path is up. If that
+			// invariant ever breaks, the downstream bootstrap.Run will
+			// surface a real auth/protocol error.
+			fmt.Print("Waiting for SSH...")
+			ctx := cmd.Context()
+			dialer := &net.Dialer{Timeout: 3 * time.Second}
+			tcpProbe := func() bool {
+				conn, derr := dialer.DialContext(ctx, "tcp", host+":22")
+				if derr != nil {
+					return false
+				}
+				_ = conn.Close()
+				return true
+			}
+			if werr := waitForSSH(tcpProbe, 60, 3*time.Second); werr != nil {
+				return fmt.Errorf("hetzner ssh wait: %w", werr)
+			}
+			fmt.Println(" reachable!")
 		}
 
 		if host == "" && sshAlias == "" {
@@ -106,29 +134,45 @@ var serverAddCmd = &cobra.Command{
 
 		fmt.Printf("Server %q saved.\n", name)
 
-		bootstrap, _ := cmd.Flags().GetBool("bootstrap")
-		if bootstrap || useHetzner {
-			client := clientFromServer(srv)
-			ctx := cmd.Context()
-			fmt.Println("Bootstrapping server...")
+		// bootstrap default is true (set in init); we still honour
+		// an explicit --bootstrap=false from the operator.
+		shouldBootstrap := bootstrapFlag
 
-			fmt.Print("  Creating ezkeel-apps network... ")
-			if _, err := client.RunRemote(ctx, "docker network create ezkeel-apps 2>/dev/null || true"); err != nil {
-				return fmt.Errorf("creating network: %w", err)
+		if shouldBootstrap {
+			ctx := cmd.Context()
+			fmt.Println("Bootstrapping server (this can take ~60s on a fresh box)...")
+
+			runner := runnerForServer(srv)
+			if err := runBootstrap(ctx, runner, bootstrap.Options{}); err != nil {
+				return fmt.Errorf("bootstrap: %w", err)
+			}
+
+			client := clientFromServer(srv)
+
+			fmt.Print("  Ensuring ezkeel-apps network... ")
+			if _, err := client.RunRemote(ctx, "docker network inspect ezkeel-apps >/dev/null 2>&1"); err != nil {
+				if _, cerr := client.RunRemote(ctx, "docker network create ezkeel-apps"); cerr != nil {
+					return fmt.Errorf("creating ezkeel-apps network: %w", cerr)
+				}
 			}
 			fmt.Println("done")
 
-			fmt.Print("  Connecting Caddy to ezkeel-apps network... ")
-			if _, err := client.RunRemote(ctx, "docker network connect ezkeel-apps ezkeel-caddy-1 2>/dev/null || true"); err != nil {
-				return fmt.Errorf("connecting caddy: %w", err)
+			fmt.Print("  Ensuring Caddy on ezkeel-apps... ")
+			// `docker network connect` errors with non-zero when the
+			// container is already attached. Probe membership first
+			// via `docker network inspect -f` listing connected
+			// containers; if ezkeel-caddy-1 is in the list, skip.
+			if _, err := client.RunRemote(ctx, "docker network inspect ezkeel-apps -f '{{range .Containers}}{{.Name}}\n{{end}}' | grep -q '^ezkeel-caddy-1$'"); err != nil {
+				if _, cerr := client.RunRemote(ctx, "docker network connect ezkeel-apps ezkeel-caddy-1"); cerr != nil {
+					return fmt.Errorf("connecting caddy to ezkeel-apps: %w", cerr)
+				}
 			}
 			fmt.Println("done")
 
 			fmt.Printf("\nServer %q ready for deployments.\n", name)
 			fmt.Printf("Deploy with: ezkeel up github.com/user/repo\n")
 		} else {
-			fmt.Printf("\nRun with --bootstrap to set up Docker networking.\n")
-			fmt.Printf("  ezkeel server add --host %s --domain %s --bootstrap\n", host, domain)
+			fmt.Printf("\nServer %q saved. Bootstrap was skipped (--bootstrap=false). The box must already have Docker, the ezkeel-agent binary, and Caddy connected to the ezkeel-apps network.\n", name)
 		}
 
 		return nil
@@ -275,6 +319,43 @@ func appPort(port int) int {
 	return port
 }
 
+const bootstrapFlagName = "bootstrap"
+
+// runnerForServer returns the bootstrap.Runner appropriate for srv:
+// AliasRunner when SSHAlias is set, otherwise a Host/User/KeyFile-based
+// SSHRunner. Mirrors clientFromServer's alias-vs-explicit fork.
+func runnerForServer(srv *config.Server) bootstrap.Runner {
+	if srv.SSHAlias != "" {
+		return bootstrap.AliasRunner{Alias: srv.SSHAlias}
+	}
+	return bootstrap.SSHRunner{
+		Host:    srv.Host,
+		User:    srv.User,
+		KeyFile: srv.SSHKey,
+	}
+}
+
+// runBootstrap is a thin shim around bootstrap.Run so server_test.go
+// can drive it with a fake runner.
+func runBootstrap(ctx context.Context, runner bootstrap.Runner, opts bootstrap.Options) error {
+	return bootstrap.Run(ctx, runner, opts)
+}
+
+// waitForSSH polls probe up to maxAttempts times, sleeping delay
+// between attempts, returning nil on the first success. delay=0 is
+// useful for tests so they don't sleep.
+func waitForSSH(probe func() bool, maxAttempts int, delay time.Duration) error {
+	for i := 0; i < maxAttempts; i++ {
+		if probe() {
+			return nil
+		}
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+	}
+	return fmt.Errorf("ssh not ready after %d attempts", maxAttempts)
+}
+
 func init() {
 	serverAddCmd.Flags().String("host", "", "Server IP or hostname")
 	serverAddCmd.Flags().String("name", "", "Server name")
@@ -282,7 +363,7 @@ func init() {
 	serverAddCmd.Flags().String("key", "", "SSH private key path")
 	serverAddCmd.Flags().String("domain", "", "Wildcard domain for apps")
 	serverAddCmd.Flags().String("ssh-alias", "", "SSH config alias (e.g. 'hetzner') — uses your SSH config for proxy/key")
-	serverAddCmd.Flags().Bool("bootstrap", false, "Set up Docker networking on the server")
+	serverAddCmd.Flags().Bool(bootstrapFlagName, true, "Install Docker + ezkeel-agent + Caddy networking on the server (set --bootstrap=false to skip)")
 	serverAddCmd.Flags().Bool("hetzner", false, "Auto-provision a Hetzner Cloud VPS")
 	serverAddCmd.Flags().String("hetzner-token", "", "Hetzner Cloud API token (or set HETZNER_TOKEN env)")
 	serverAddCmd.Flags().String("hetzner-type", "cx22", "Hetzner server type (cx22=2vCPU/4GB, cx32=4vCPU/8GB)")

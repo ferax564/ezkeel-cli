@@ -13,6 +13,7 @@ import (
 	"github.com/ferax564/ezkeel-cli/pkg/agent"
 	"github.com/ferax564/ezkeel-cli/internal/config"
 	"github.com/ferax564/ezkeel-cli/internal/detect"
+	"github.com/ferax564/ezkeel-cli/internal/spec"
 	"github.com/ferax564/ezkeel-cli/internal/tui"
 	"github.com/ferax564/ezkeel-cli/pkg/templates"
 	"github.com/spf13/cobra"
@@ -109,6 +110,201 @@ func resolveTemplateArg(slug string, args []string) ([]string, string, error) {
 	return []string{tmpl.RepoURL}, warning, nil
 }
 
+// applySpec layers ezkeel.yaml overrides onto detected framework
+// settings. Empty-valued spec fields are left untouched so a partial
+// spec is additive rather than destructive. Returns true when at
+// least one field was overridden, so the caller can log a one-liner.
+//
+// When the spec declares a framework that auto-detect didn't already
+// match, canonical Build/Start/Port defaults are filled in from
+// detect.DefaultsFor first so a framework-only spec produces a
+// runnable Dockerfile. Explicit spec fields below override those
+// defaults, and any non-zero value already on `fr` (from a successful
+// auto-detect) is preserved.
+func applySpec(fr *detect.FrameworkResult, s *spec.Spec) bool {
+	if s == nil || fr == nil {
+		return false
+	}
+	overridden := false
+	if s.Framework != "" {
+		fwk := detect.Framework(s.Framework)
+
+		// Identify the change shape:
+		//   - rescue: auto-detect was empty/Unknown → fill from defaults
+		//   - switch: auto-detect found a different framework → replace
+		//     detected defaults wholesale (otherwise the new framework
+		//     inherits the old framework's Build/Start/Port — e.g. a
+		//     Vite-detected repo with `framework: express` would still
+		//     ship with "npx serve dist" inside an Express container)
+		//   - augment: spec framework == detected framework → leave
+		//     detected defaults alone, spec's explicit fields below win
+		rescue := fr.Framework == "" || fr.Framework == detect.FrameworkUnknown
+		isSwitch := !rescue && fr.Framework != fwk
+
+		if defaults, ok := detect.DefaultsFor(fwk); ok {
+			if isSwitch {
+				// Wholesale replace — defaults belong to the spec's
+				// framework now.
+				fr.Build = defaults.Build
+				fr.Start = defaults.Start
+				fr.Port = defaults.Port
+			} else {
+				// rescue or augment: only fill blanks.
+				if fr.Build == "" {
+					fr.Build = defaults.Build
+				}
+				if fr.Start == "" {
+					fr.Start = defaults.Start
+				}
+				if fr.Port == 0 {
+					fr.Port = defaults.Port
+				}
+			}
+		}
+
+		fr.Framework = fwk
+		// If auto-detect couldn't classify the dir it left Dockerfile
+		// empty. The spec just rescued the framework — make sure the
+		// later "auto" Dockerfile-generation path actually runs instead
+		// of pointing docker build at a non-existent file. Existing
+		// values (e.g. "Dockerfile" or "auto") are preserved.
+		if fr.Dockerfile == "" {
+			fr.Dockerfile = "auto"
+		}
+		overridden = true
+	}
+	if s.Build != "" {
+		fr.Build = s.Build
+		overridden = true
+	}
+	if s.Start != "" {
+		fr.Start = s.Start
+		overridden = true
+	}
+	if s.Port != 0 {
+		fr.Port = s.Port
+		overridden = true
+	}
+	return overridden
+}
+
+// validateSpecFramework rejects ezkeel.yaml `framework:` values that
+// don't appear in the canonical defaults table. Without this gate, a
+// typo like `framework: nodejs` would silently pass the
+// FrameworkUnknown check inside runUp (because applySpec sets a
+// non-empty value) and then fail much later in
+// detect.GenerateDockerfile with "no Dockerfile template for
+// framework nodejs". Catching the typo at spec-load time produces a
+// clearer error pointing the user at the supported list.
+//
+// Returns nil for an unset framework field — the auto-detect path
+// handles that case downstream.
+func validateSpecFramework(s *spec.Spec) error {
+	if s == nil || s.Framework == "" {
+		return nil
+	}
+	if _, ok := detect.DefaultsFor(detect.Framework(s.Framework)); !ok {
+		return fmt.Errorf("unsupported framework %q; run `ezkeel up --help` for the supported list, or remove the framework: line to use auto-detect", s.Framework)
+	}
+	return nil
+}
+
+// resolveAppName picks the deployment app name from the highest-priority
+// source. Priority: --name flag > spec.Name > repo URL basename >
+// source-directory basename.
+//
+// Promoting spec.Name above the repo/dir fallbacks lets the spec's
+// required `name` field actually control deployment identity — without
+// this hoist, `name: api-server` in ezkeel.yaml would lose to the
+// repo's directory name on every deploy.
+func resolveAppName(nameFlag, repoURL, sourceDir string, s *spec.Spec) string {
+	if nameFlag != "" {
+		return nameFlag
+	}
+	if s != nil && s.Name != "" {
+		return s.Name
+	}
+	if repoURL != "" {
+		return appNameFromRepo(repoURL)
+	}
+	return appNameFromDir(sourceDir)
+}
+
+// resolveResources picks resource limits from highest priority: the
+// --memory / --cpus flags > ezkeel.yaml resources block > unset (no
+// limits). Each field is resolved independently so a partial spec
+// (memory only) plus a partial flag (cpus only) cleanly composes.
+//
+// Without this hoist, spec.Resources is parsed but discarded and a
+// scaffolded `resources.memory: 512m` is silently ignored — the deploy
+// runs uncapped unless the user also passes --memory on the CLI.
+func resolveResources(memFlag, cpuFlag string, s *spec.Spec) (mem, cpu string) {
+	mem, cpu = memFlag, cpuFlag
+	if s == nil {
+		return
+	}
+	if mem == "" && s.Resources.Memory != "" {
+		mem = s.Resources.Memory
+	}
+	if cpu == "" && s.Resources.CPUs != "" {
+		cpu = s.Resources.CPUs
+	}
+	return
+}
+
+// applyServicesFromSpec layers ezkeel.yaml services onto the
+// auto-detected database result. Spec overrides detect when a service
+// engine is explicitly declared so a repo without an importable client
+// dependency (e.g. a Rust app speaking raw libpq) still triggers
+// Postgres provisioning when the spec asks for it.
+//
+// Engine aliases (postgresql→postgres, pg→postgres) are normalized to
+// the canonical detect.DBEngine constants so a typo or natural-language
+// alias does not silently bypass DB provisioning. Unknown engines —
+// including mysql/mariadb, which the deploy step does not yet
+// provision — return an error so the caller can surface it loudly
+// instead of letting the deploy step skip the entire database step.
+//
+// services.db.version is carried through to DatabaseResult.Version;
+// the deploy step substitutes its own default (Postgres 16) when the
+// spec leaves it blank.
+func applyServicesFromSpec(detected *detect.DatabaseResult, s *spec.Spec) (*detect.DatabaseResult, error) {
+	if s == nil {
+		return detected, nil
+	}
+	svc, ok := s.Services["db"]
+	if !ok || svc.Engine == "" {
+		return detected, nil
+	}
+	engine, err := normalizeDBEngine(svc.Engine)
+	if err != nil {
+		return nil, err
+	}
+	return &detect.DatabaseResult{Engine: engine, Version: svc.Version}, nil
+}
+
+// normalizeDBEngine maps common Postgres aliases (postgresql, pg) to
+// the canonical detect.DBEngine constant and rejects unsupported values.
+//
+// The cast `detect.DBEngine(raw)` would silently accept anything — and
+// then the deploy step's `switch` on DBPostgres would fall through,
+// skipping DB provisioning AND DATABASE_URL injection. Spec promised
+// Postgres, container starts with no DB. Reject loudly.
+//
+// mysql/mariadb are deliberately rejected at the spec layer until the
+// deploy pipeline gains MySQL provisioning. `runUp` only provisions
+// when dbResult.Engine == detect.DBPostgres; a passing-through `mysql`
+// would silently skip DB provisioning instead of failing fast.
+func normalizeDBEngine(raw string) (detect.DBEngine, error) {
+	switch strings.ToLower(raw) {
+	case "postgres", "postgresql", "pg":
+		return detect.DBPostgres, nil
+	case "mysql", "mariadb":
+		return "", fmt.Errorf("services.db.engine %q: mysql/mariadb provisioning is not yet implemented (only postgres is supported in v1)", raw)
+	}
+	return "", fmt.Errorf("unsupported services.db.engine %q (supported: postgres)", raw)
+}
+
 func runUp(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	start := time.Now()
@@ -160,14 +356,46 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Step 3: Determine app name
-	appName := nameFlag
-	if appName == "" && repoURL != "" {
-		appName = appNameFromRepo(repoURL)
+	// Load ezkeel.yaml (if any) before resolving app name so spec.Name
+	// can win over the repo/dir fallback. This also lets us reject an
+	// unsupported `framework:` value before the TUI starts —
+	// validation here means a clear plain-error instead of a
+	// misleading "no Dockerfile template" failure deep in the build
+	// step. The spec is then re-used inside Step 0 by applySpec.
+	//
+	// Resolution policy depends on how we got the source:
+	//   - Repo URL clone (tempDir != ""): only check the clone root.
+	//     Walking up parents would land in /tmp and could pick up an
+	//     unrelated ezkeel.yaml from a sibling clone or a bind mount.
+	//   - Local cwd deploy: walk up via spec.Find so a project nested
+	//     inside subdirs still finds the repo-root spec.
+	var loadedSpec *spec.Spec
+	if tempDir != "" {
+		s, lerr := spec.LoadFromDir(tempDir)
+		if lerr != nil {
+			return fmt.Errorf("loading ezkeel.yaml: %w", lerr)
+		}
+		if s != nil {
+			if verr := validateSpecFramework(s); verr != nil {
+				return fmt.Errorf("%s: %w", filepath.Join(tempDir, "ezkeel.yaml"), verr)
+			}
+			loadedSpec = s
+		}
+	} else {
+		if specPath, ferr := spec.Find(sourceDir); ferr == nil {
+			s, lerr := spec.Load(specPath)
+			if lerr != nil {
+				return fmt.Errorf("loading %s: %w", specPath, lerr)
+			}
+			if verr := validateSpecFramework(s); verr != nil {
+				return fmt.Errorf("%s: %w", specPath, verr)
+			}
+			loadedSpec = s
+		}
 	}
-	if appName == "" {
-		appName = appNameFromDir(sourceDir)
-	}
+
+	// Step 3: Determine app name (--name > spec.Name > repo > dir)
+	appName := resolveAppName(nameFlag, repoURL, sourceDir, loadedSpec)
 
 	// Step 4: Set up deploy model and steps
 	stepLabels := []string{
@@ -204,18 +432,36 @@ func runUp(cmd *cobra.Command, args []string) error {
 		printStep(tui.IconFail, "detect framework: "+err.Error())
 		return fmt.Errorf("detecting framework in %s: %w\n\nhint: pass a repo URL with `ezkeel up <repo-url>` or run from the project root", sourceDir, err)
 	}
+
+	// Layer in ezkeel.yaml overrides if present. The spec was already
+	// loaded + validated above (before TUI start), so applySpec just
+	// takes the parsed value. Placed before the FrameworkUnknown gate
+	// so an explicit framework override can rescue a directory the
+	// auto-detector cannot classify.
+	overridden := applySpec(fr, loadedSpec)
+
 	if fr.Framework == detect.FrameworkUnknown {
 		model.FailStep(0, "unknown framework")
 		printProgress()
 		printStep(tui.IconFail, "detect framework: unknown framework")
-		return fmt.Errorf("could not detect a supported framework in %s\n\nhint: drop a Dockerfile next to your code and run `ezkeel up` again — ezkeel will use it as-is.\nsupported frameworks: run `ezkeel up --help` or visit https://ezkeel.com/docs.html", sourceDir)
+		return fmt.Errorf("could not detect a supported framework in %s\n\nhint: drop a Dockerfile next to your code and run `ezkeel up` again, or declare framework: in an ezkeel.yaml at the repo root.\nsupported frameworks: run `ezkeel up --help` or visit https://ezkeel.com/docs.html", sourceDir)
 	}
 
 	dbResult := detect.DetectDatabase(sourceDir)
+	dbResult, err = applyServicesFromSpec(dbResult, loadedSpec)
+	if err != nil {
+		model.FailStep(0, err.Error())
+		printProgress()
+		printStep(tui.IconFail, "ezkeel.yaml services: "+err.Error())
+		return fmt.Errorf("ezkeel.yaml: %w", err)
+	}
 
 	model.CompleteStep(0, fmt.Sprintf("detected %s", fr.Framework))
 	printProgress()
 	printStep(tui.IconDone, fmt.Sprintf("detected %s", fr.Framework))
+	if overridden {
+		printStep(tui.IconDone, "applied ezkeel.yaml overrides")
+	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	if dryRun {
@@ -300,8 +546,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	client := clientFromServer(srv)
 	deployPort := appPort(fr.Port)
-	memoryLimit, _ := cmd.Flags().GetString("memory")
-	cpuLimit, _ := cmd.Flags().GetString("cpus")
+	memFlag, _ := cmd.Flags().GetString("memory")
+	cpuFlag, _ := cmd.Flags().GetString("cpus")
+	memoryLimit, cpuLimit := resolveResources(memFlag, cpuFlag, loadedSpec)
 
 	// Push image to server
 	printStep(tui.IconActive, "pushing image to "+srv.Name+"...")
@@ -340,11 +587,17 @@ func runUp(cmd *cobra.Command, args []string) error {
 		printStep(tui.IconActive, "provisioning PostgreSQL...")
 		dbPass := generateDBPassword()
 		dbName := appNameToDBName(appName)
+		// Spec-declared services.db.version wins; otherwise default to
+		// Postgres 16 (the historical hardcoded value).
+		dbVersion := dbResult.Version
+		if dbVersion == "" {
+			dbVersion = "16"
+		}
 		dbResp, dbErr := client.Send(ctx, &agent.Request{
 			Type: agent.CmdDBCreate,
 			DBCreate: &agent.DBCreateRequest{
 				Engine:   string(dbResult.Engine),
-				Version:  "16",
+				Version:  dbVersion,
 				Database: dbName,
 				User:     dbName,
 				Password: dbPass,
