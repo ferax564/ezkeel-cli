@@ -160,7 +160,11 @@ CMD %s
 func generateGoDockerfile(fr *FrameworkResult) string {
 	build := fr.Build
 	if build == "" {
-		build = "go build -o /app/app ./..."
+		// Mirror DefaultsFor(FrameworkGo). `-o /app/app .` (NOT `./...`)
+		// is required: combining `-o <file>` with `./...` fails for
+		// multi-package modules. Repos with main at ./cmd/<name> override
+		// Build in ezkeel.yaml.
+		build = "go build -o /app/app ."
 	}
 	cmd := shellToCMD(fr.Start)
 	if cmd == "" || cmd == "[]" {

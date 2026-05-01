@@ -111,6 +111,11 @@ func shellQuote(s string) string {
 // short-circuit before sudo runs on already-bootstrapped hosts, so
 // subsequent runs never invoke sudo at all. As root, `sudo -n` is a
 // no-op.
+//
+// The later chown_platform_dir step transfers ownership of /opt/ezkeel
+// (including this Caddyfile) to the SSH user so subsequent `ezkeel up`
+// invocations can append per-app reverse_proxy blocks via plain
+// `printf >>` without sudo.
 func caddyfileWriteCmd() string {
 	return fmt.Sprintf(
 		"test -f /opt/ezkeel/Caddyfile || test -f /opt/ezkeel/docker-compose.yml || sudo -n tee /opt/ezkeel/Caddyfile >/dev/null <<'EZKEELEOF'\n%sEZKEELEOF",
@@ -191,6 +196,20 @@ func Steps(opts Options) []Step {
 
 		// Privileged — docker daemon socket access.
 		{Name: "caddy_up", Cmd: "test -f /opt/ezkeel/docker-compose.yml || (cd /opt/ezkeel && sudo -n docker compose -p ezkeel up -d)"},
+
+		// Privileged — transfer /opt/ezkeel ownership from root to the
+		// SSH user so subsequent `ezkeel up` flows can append per-app
+		// reverse_proxy blocks via plain `printf >>` without sudo. As
+		// root, this collapses to `chown root:root` (a no-op).
+		{Name: "chown_platform_dir", Cmd: `sudo -n chown -R "$(id -un):$(id -gn)" /opt/ezkeel`},
+
+		// Privileged — add the SSH user to the docker group so subsequent
+		// SSH sessions can run plain `docker` commands (network create,
+		// exec for caddy reload, load) without sudo. New group membership
+		// is picked up by the NEXT login shell — each `ssh user@host cmd`
+		// opens a fresh shell, so this is sufficient. Guarded by `id -u`
+		// so as root the step is a no-op (root already has socket access).
+		{Name: "docker_group_add", Cmd: `if [ "$(id -u)" != "0" ]; then sudo -n usermod -aG docker "$(id -un)"; fi`},
 	}
 }
 

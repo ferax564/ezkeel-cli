@@ -3,6 +3,7 @@ package detect_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ferax564/ezkeel-cli/internal/detect"
@@ -254,5 +255,24 @@ func TestDefaultsForRustMatchesDetectFramework(t *testing.T) {
 		t.Errorf("Rust mismatch:\n  detected: build=%q start=%q port=%d\n  defaults: build=%q start=%q port=%d",
 			detected.Build, detected.Start, detected.Port,
 			defaults.Build, defaults.Start, defaults.Port)
+	}
+}
+
+// TestFrameworkGoDefaultBuildIsSinglePackage guards the round-9 fix for
+// multi-package Go modules. `go build -o <file> ./...` errors with
+// "cannot write multiple packages to non-directory" whenever a repo has
+// internal/, cmd/X/, or any other non-root packages — i.e. nearly every
+// real-world Go service. The canonical default builds the current dir
+// only; repos with main at ./cmd/<name> override Build in ezkeel.yaml.
+func TestFrameworkGoDefaultBuildIsSinglePackage(t *testing.T) {
+	fr, ok := detect.DefaultsFor(detect.FrameworkGo)
+	if !ok {
+		t.Fatal("DefaultsFor(FrameworkGo) returned false")
+	}
+	if strings.Contains(fr.Build, "./...") {
+		t.Errorf("Default Go build must not use ./... with -o (fails for multi-package modules); got: %q", fr.Build)
+	}
+	if !strings.Contains(fr.Build, "-o /app/app") {
+		t.Errorf("Default Go build must produce /app/app for the runner stage COPY; got: %q", fr.Build)
 	}
 }

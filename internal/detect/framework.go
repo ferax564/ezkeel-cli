@@ -93,9 +93,16 @@ func DetectFramework(dir string) (*FrameworkResult, error) {
 			// Output to /app/app so the runner stage's
 			// COPY --from=builder /app/app /app/app finds the binary
 			// regardless of the source package layout. Without an explicit
-			// `-o`, `go build ./...` lands the binary at `/app/<pkg>`,
+			// `-o`, `go build .` lands the binary at `/app/<pkg>`,
 			// which the COPY can't anticipate.
-			Build:      "go build -o /app/app ./...",
+			//
+			// Build target is `.` (current dir) NOT `./...`: combining
+			// `-o <file>` with `./...` is invalid for multi-package
+			// modules ("cannot write multiple packages to non-directory")
+			// and breaks any repo with internal/ or cmd/ subdirs. Repos
+			// whose main package lives at ./cmd/<name> can override Build
+			// in ezkeel.yaml.
+			Build:      "go build -o /app/app .",
 			Start:      "./app",
 			Port:       8080,
 			Dockerfile: "auto",
@@ -323,7 +330,7 @@ func containsWord(text, word string) bool {
 func DefaultsFor(framework Framework) (*FrameworkResult, bool) {
 	switch framework {
 	case FrameworkGo:
-		return &FrameworkResult{Framework: framework, Build: "go build -o /app/app ./...", Start: "./app", Port: 8080, Dockerfile: "auto"}, true
+		return &FrameworkResult{Framework: framework, Build: "go build -o /app/app .", Start: "./app", Port: 8080, Dockerfile: "auto"}, true
 	case FrameworkRust:
 		return &FrameworkResult{Framework: framework, Build: "cargo build --release", Start: "./app", Port: 8080, Dockerfile: "auto"}, true
 	case FrameworkStatic:

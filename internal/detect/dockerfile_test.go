@@ -76,8 +76,10 @@ func TestGenerateDockerfile_Go(t *testing.T) {
 	fr := &FrameworkResult{
 		Framework: FrameworkGo,
 		// Mirror the canonical default — the build must produce a binary
-		// at /app/app for the runner stage's COPY to find it.
-		Build:      "go build -o /app/app ./...",
+		// at /app/app for the runner stage's COPY to find it. Target is
+		// `.` (single package) not `./...`: `-o <file>` + `./...` is
+		// invalid for multi-package modules.
+		Build:      "go build -o /app/app .",
 		Start:      "./app",
 		Port:       8080,
 		Dockerfile: "auto",

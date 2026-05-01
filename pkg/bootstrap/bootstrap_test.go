@@ -26,10 +26,11 @@ func TestRunHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// 3 original calls (probe, download, verify) + 5 unconditional Caddy
-	// install steps (network, mkdir, Caddyfile write, compose write, up).
-	if len(r.calls) != 8 {
-		t.Fatalf("calls = %d, want 8", len(r.calls))
+	// 3 original calls (probe, download, verify) + 7 unconditional Caddy
+	// install steps (network, mkdir, Caddyfile write, compose write, up,
+	// chown_platform_dir, docker_group_add).
+	if len(r.calls) != 10 {
+		t.Fatalf("calls = %d, want 10", len(r.calls))
 	}
 	if !strings.HasPrefix(r.calls[0], "docker --version") {
 		t.Errorf("call 0 = %q", r.calls[0])
@@ -42,6 +43,12 @@ func TestRunHappyPath(t *testing.T) {
 	}
 	if !strings.Contains(r.calls[7], "docker compose -p ezkeel up -d") {
 		t.Errorf("call 7 = %q, want caddy_up", r.calls[7])
+	}
+	if !strings.Contains(r.calls[8], "chown -R") {
+		t.Errorf("call 8 = %q, want chown_platform_dir", r.calls[8])
+	}
+	if !strings.Contains(r.calls[9], "usermod -aG docker") {
+		t.Errorf("call 9 = %q, want docker_group_add", r.calls[9])
 	}
 }
 
@@ -58,9 +65,11 @@ func TestRunDockerMissingTriggersInstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	// 4 original calls (probe, install, download, verify) + 5 Caddy steps.
-	if len(r.calls) != 9 {
-		t.Fatalf("calls = %d, want 9 (probe, install, download, verify, +5 caddy)", len(r.calls))
+	// 4 original calls (probe, install, download, verify) + 7 Caddy steps
+	// (network, mkdir, Caddyfile write, compose write, up,
+	// chown_platform_dir, docker_group_add).
+	if len(r.calls) != 11 {
+		t.Fatalf("calls = %d, want 11 (probe, install, download, verify, +7 caddy)", len(r.calls))
 	}
 	if !strings.Contains(r.calls[1], "get.docker.com") {
 		t.Errorf("call 1 = %q", r.calls[1])
@@ -204,6 +213,8 @@ func TestStepsExposed(t *testing.T) {
 		"caddyfile_write",
 		"caddy_compose_write",
 		"caddy_up",
+		"chown_platform_dir",
+		"docker_group_add",
 	}
 	if len(steps) != len(want) {
 		t.Fatalf("len = %d, want %d", len(steps), len(want))
@@ -212,6 +223,34 @@ func TestStepsExposed(t *testing.T) {
 		if s.Name != want[i] {
 			t.Errorf("steps[%d].Name = %q, want %q", i, s.Name, want[i])
 		}
+	}
+}
+
+// TestStepsExposed_ChownAndGroupAdd guards two non-root operator steps
+// added in round 9. Without `chown_platform_dir`, the SSH user can't
+// `printf >> /opt/ezkeel/Caddyfile` after bootstrap (root-owned via
+// `sudo -n tee` write). Without `docker_group_add`, the SSH user can't
+// run `docker network create` / `docker exec` (root-owned socket). Both
+// are no-ops as root.
+func TestStepsExposed_ChownAndGroupAdd(t *testing.T) {
+	steps := Steps(Options{AgentURL: "https://example/agent"})
+	var chown, group Step
+	for _, s := range steps {
+		switch s.Name {
+		case "chown_platform_dir":
+			chown = s
+		case "docker_group_add":
+			group = s
+		}
+	}
+	if !strings.Contains(chown.Cmd, "chown -R") {
+		t.Errorf("chown_platform_dir must chown recursively; got: %q", chown.Cmd)
+	}
+	if !strings.Contains(group.Cmd, "usermod -aG docker") {
+		t.Errorf("docker_group_add must add user to docker group; got: %q", group.Cmd)
+	}
+	if !strings.Contains(group.Cmd, `id -u`) {
+		t.Errorf("docker_group_add must guard with `id -u` so root is a no-op; got: %q", group.Cmd)
 	}
 }
 
@@ -368,6 +407,7 @@ func TestPrivilegedStepsUseSudo(t *testing.T) {
 	privileged := []string{
 		"docker_install", "agent_download", "ezkeel_apps_network",
 		"platform_dir", "caddyfile_write", "caddy_compose_write", "caddy_up",
+		"chown_platform_dir", "docker_group_add",
 	}
 	privSet := make(map[string]bool, len(privileged))
 	for _, n := range privileged {
