@@ -323,3 +323,110 @@ func TestGenerateDockerfile_HonorsRemixBuildOverride(t *testing.T) {
 		t.Errorf("Node SSR Dockerfile missing custom Build override:\n%s", got)
 	}
 }
+
+// TestShellToCMDSimpleCommandIsExecForm asserts that simple
+// space-separated commands without shell metacharacters emit Docker
+// exec-form so the binary runs as PID 1 with proper signal forwarding.
+func TestShellToCMDSimpleCommandIsExecForm(t *testing.T) {
+	got := shellToCMD("node index.js")
+	want := `["node", "index.js"]`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestShellToCMDShellMetaUsesShellForm asserts that commands containing
+// shell metacharacters (quotes, pipes, &&, ;, redirects) bypass
+// Fields-splitting and pass through verbatim — Docker wraps them with
+// `sh -c` so the shell semantics survive. Without this, specs like
+// `start: sh -c "python migrate && gunicorn app:app"` would generate
+// a Dockerfile with malformed exec-form JSON and fail to build.
+func TestShellToCMDShellMetaUsesShellForm(t *testing.T) {
+	cases := []string{
+		`sh -c "python manage.py migrate && gunicorn app:app"`,
+		`node server.js | tee /var/log/app.log`,
+		`flask run --port=5000 ; gunicorn`,
+		`bash -c 'echo hello && exit 0'`,
+		`/app/server > /var/log/app.log 2>&1`,
+		`/app/run --env=$NODE_ENV`,
+	}
+	for _, c := range cases {
+		got := shellToCMD(c)
+		if strings.HasPrefix(got, "[") {
+			t.Errorf("%q got exec-form %q; expected shell-form (verbatim passthrough)", c, got)
+		}
+		if got != c {
+			t.Errorf("%q got %q; expected verbatim shell-form", c, got)
+		}
+	}
+}
+
+// TestShellToCMDEmptyReturnsEmptyArray pins the degenerate input
+// behavior: an empty start command yields the empty exec-form array
+// `[]`. Callers (Go, Rust) detect this and substitute their own
+// runner-stage default (`["./app"]`).
+func TestShellToCMDEmptyReturnsEmptyArray(t *testing.T) {
+	if got := shellToCMD(""); got != "[]" {
+		t.Errorf("got %q, want []", got)
+	}
+}
+
+// TestNeedsShell directly exercises the metacharacter detector. Any
+// false negative here would route a shell-needing command through
+// Fields-split and produce malformed JSON in the generated Dockerfile.
+func TestNeedsShell(t *testing.T) {
+	shellish := []string{
+		"a && b",
+		"a || b",
+		`echo "x"`,
+		`echo 'x'`,
+		"a | b",
+		"a > b",
+		"a < b",
+		"a ; b",
+		"a $X",
+		"echo `date`",
+	}
+	plain := []string{
+		"node index.js",
+		"uvicorn main:app --host 0.0.0.0 --port 8000",
+		"flask run --host=0.0.0.0 --port=5000",
+		"python manage.py runserver 0.0.0.0:8000",
+		"/app/server",
+		"./app",
+		"bundle exec rails server -b 0.0.0.0 -p 3000",
+	}
+	for _, s := range shellish {
+		if !needsShell(s) {
+			t.Errorf("%q should need shell", s)
+		}
+	}
+	for _, s := range plain {
+		if needsShell(s) {
+			t.Errorf("%q should NOT need shell", s)
+		}
+	}
+}
+
+// TestGenerateDockerfile_PythonShellStart asserts that a Python spec
+// with a shell-form start command (sh -c "...") generates a working
+// Dockerfile that uses shell-form CMD. Before this fix, Fields-split
+// produced broken JSON like `CMD ["sh", "-c", "\"python", ...]`.
+func TestGenerateDockerfile_PythonShellStart(t *testing.T) {
+	fr := &FrameworkResult{
+		Framework:  FrameworkFastAPI,
+		Build:      "",
+		Start:      `sh -c "python manage.py migrate && gunicorn app:app"`,
+		Port:       8000,
+		Dockerfile: "auto",
+	}
+	got := GenerateDockerfile(fr)
+	wantLine := `CMD sh -c "python manage.py migrate && gunicorn app:app"`
+	if !strings.Contains(got, wantLine) {
+		t.Errorf("Python Dockerfile missing shell-form CMD line %q\nGot:\n%s", wantLine, got)
+	}
+	// Must NOT emit broken exec-form JSON.
+	if strings.Contains(got, `CMD ["sh", "-c", "\"python"`) {
+		t.Errorf("Python Dockerfile has broken exec-form JSON:\n%s", got)
+	}
+}

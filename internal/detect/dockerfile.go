@@ -101,7 +101,7 @@ COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 COPY . .
 EXPOSE %d
-CMD [%s]
+CMD %s
 `, fr.Port, shellToCMD(fr.Start))
 }
 
@@ -130,7 +130,7 @@ ENV NODE_ENV=production
 COPY --from=builder /app ./
 RUN npm ci --omit=dev
 EXPOSE %d
-CMD [%s]
+CMD %s
 `, build, fr.Port, shellToCMD(fr.Start))
 }
 
@@ -147,7 +147,7 @@ COPY requirements.txt* ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 %sEXPOSE %d
-CMD [%s]
+CMD %s
 `, buildStep, fr.Port, shellToCMD(fr.Start))
 }
 
@@ -163,8 +163,8 @@ func generateGoDockerfile(fr *FrameworkResult) string {
 		build = "go build -o /app/app ./..."
 	}
 	cmd := shellToCMD(fr.Start)
-	if cmd == "" {
-		cmd = `"./app"`
+	if cmd == "" || cmd == "[]" {
+		cmd = `["./app"]`
 	}
 	return fmt.Sprintf(`FROM golang:1.23-alpine AS builder
 WORKDIR /app
@@ -178,7 +178,7 @@ FROM alpine:latest AS runner
 WORKDIR /app
 COPY --from=builder /app/app /app/app
 EXPOSE %d
-CMD [%s]
+CMD %s
 `, build, fr.Port, cmd)
 }
 
@@ -197,8 +197,8 @@ func generateRustDockerfile(fr *FrameworkResult) string {
 		build = "cargo build --release"
 	}
 	cmd := shellToCMD(fr.Start)
-	if cmd == "" {
-		cmd = `"./app"`
+	if cmd == "" || cmd == "[]" {
+		cmd = `["./app"]`
 	}
 	return fmt.Sprintf(`FROM rust:1.80-slim AS builder
 WORKDIR /app
@@ -209,7 +209,7 @@ FROM debian:bookworm-slim AS runner
 WORKDIR /app
 COPY --from=builder /app/target/release/app /app/app
 EXPOSE %d
-CMD [%s]
+CMD %s
 `, build, fr.Port, cmd)
 }
 
@@ -222,7 +222,7 @@ COPY Gemfile Gemfile.lock* ./
 RUN bundle install
 COPY . .
 EXPOSE %d
-CMD [%s]
+CMD %s
 `, fr.Port, shellToCMD(fr.Start))
 }
 
@@ -236,21 +236,47 @@ CMD ["caddy", "file-server", "--root", "/srv"]
 `
 }
 
-// shellToCMD converts a shell command string (e.g. "node index.js") into a
-// Docker JSON exec-form argument list (e.g. `"node", "index.js"`).
-// It performs a simple whitespace split — sufficient for the well-known
-// start commands produced by DetectFramework.
+// shellToCMD returns the payload that follows `CMD ` in a Dockerfile.
+//
+// For simple space-separated commands it emits Docker exec-form
+// (`["binary", "arg"]`) so the binary runs as PID 1 and signals are
+// forwarded correctly.
+//
+// For commands containing shell metacharacters — quotes, redirects,
+// pipes, `&&`, `||`, `;`, `$` — Fields-splitting would shred the
+// command into broken JSON tokens (e.g.
+// `["sh", "-c", "\"python", "manage.py", "&&"]`). Those route to
+// shell-form (the bare command string after `CMD `), which Docker
+// implicitly wraps with `sh -c` and preserves shell semantics.
+//
+// An empty input returns the empty array `[]` — preserves prior
+// behavior for callers that supply their own fallback (Go/Rust).
 func shellToCMD(cmd string) string {
 	if cmd == "" {
-		return ""
+		return "[]"
+	}
+	if needsShell(cmd) {
+		// Shell-form: docker wraps with `sh -c`. Emit the command
+		// string verbatim so quoting and redirects survive.
+		return cmd
 	}
 	parts := strings.Fields(cmd)
-	result := ""
+	quoted := make([]string, len(parts))
 	for i, p := range parts {
-		if i > 0 {
-			result += ", "
-		}
-		result += `"` + p + `"`
+		quoted[i] = `"` + p + `"`
 	}
-	return result
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+// needsShell reports whether cmd contains shell metacharacters that
+// make a naive Fields-split unsafe. When true, the caller must emit
+// shell-form CMD instead of exec-form.
+func needsShell(cmd string) bool {
+	metaChars := []string{`"`, `'`, "`", "&&", "||", ";", "|", ">", "<", "$"}
+	for _, m := range metaChars {
+		if strings.Contains(cmd, m) {
+			return true
+		}
+	}
+	return false
 }

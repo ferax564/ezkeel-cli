@@ -258,11 +258,12 @@ func resolveResources(memFlag, cpuFlag string, s *spec.Spec) (mem, cpu string) {
 // dependency (e.g. a Rust app speaking raw libpq) still triggers
 // Postgres provisioning when the spec asks for it.
 //
-// Engine aliases (postgresql→postgres, mariadb→mysql, …) are normalized
-// to the canonical detect.DBEngine constants so a typo or natural-language
-// alias does not silently bypass DB provisioning. Unknown engines return
-// an error so the caller can surface it loudly instead of letting the
-// deploy step skip the entire database step.
+// Engine aliases (postgresql→postgres, pg→postgres) are normalized to
+// the canonical detect.DBEngine constants so a typo or natural-language
+// alias does not silently bypass DB provisioning. Unknown engines —
+// including mysql/mariadb, which the deploy step does not yet
+// provision — return an error so the caller can surface it loudly
+// instead of letting the deploy step skip the entire database step.
 //
 // services.db.version is carried through to DatabaseResult.Version;
 // the deploy step substitutes its own default (Postgres 16) when the
@@ -282,21 +283,26 @@ func applyServicesFromSpec(detected *detect.DatabaseResult, s *spec.Spec) (*dete
 	return &detect.DatabaseResult{Engine: engine, Version: svc.Version}, nil
 }
 
-// normalizeDBEngine maps common aliases (postgresql, pg, mariadb) to the
-// canonical detect.DBEngine constants and rejects unsupported values.
+// normalizeDBEngine maps common Postgres aliases (postgresql, pg) to
+// the canonical detect.DBEngine constant and rejects unsupported values.
 //
 // The cast `detect.DBEngine(raw)` would silently accept anything — and
-// then the deploy step's `switch` on DBPostgres / DBMySQL would fall
-// through, skipping DB provisioning AND DATABASE_URL injection. Spec
-// promised Postgres, container starts with no DB. Reject loudly.
+// then the deploy step's `switch` on DBPostgres would fall through,
+// skipping DB provisioning AND DATABASE_URL injection. Spec promised
+// Postgres, container starts with no DB. Reject loudly.
+//
+// mysql/mariadb are deliberately rejected at the spec layer until the
+// deploy pipeline gains MySQL provisioning. `runUp` only provisions
+// when dbResult.Engine == detect.DBPostgres; a passing-through `mysql`
+// would silently skip DB provisioning instead of failing fast.
 func normalizeDBEngine(raw string) (detect.DBEngine, error) {
 	switch strings.ToLower(raw) {
 	case "postgres", "postgresql", "pg":
 		return detect.DBPostgres, nil
 	case "mysql", "mariadb":
-		return detect.DBMySQL, nil
+		return "", fmt.Errorf("services.db.engine %q: mysql/mariadb provisioning is not yet implemented (only postgres is supported in v1)", raw)
 	}
-	return "", fmt.Errorf("unsupported services.db.engine %q (supported: postgres, mysql)", raw)
+	return "", fmt.Errorf("unsupported services.db.engine %q (supported: postgres)", raw)
 }
 
 func runUp(cmd *cobra.Command, args []string) error {

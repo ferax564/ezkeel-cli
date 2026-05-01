@@ -326,8 +326,6 @@ func TestNormalizeDBEngine_Aliases(t *testing.T) {
 		{"postgresql", detect.DBPostgres},
 		{"PostgreSQL", detect.DBPostgres},
 		{"pg", detect.DBPostgres},
-		{"mysql", detect.DBMySQL},
-		{"mariadb", detect.DBMySQL},
 	}
 	for _, c := range cases {
 		got, err := normalizeDBEngine(c.in)
@@ -346,6 +344,24 @@ func TestNormalizeDBEngine_Rejects(t *testing.T) {
 	for _, in := range rejected {
 		if _, err := normalizeDBEngine(in); err == nil {
 			t.Errorf("%q: expected error, got nil", in)
+		}
+	}
+}
+
+// TestNormalizeDBEngine_RejectsMySQLUntilProvisioned guards the contract
+// gap: the deploy step in runUp only provisions when Engine ==
+// DBPostgres, so accepting mysql/mariadb here would silently skip DB
+// provisioning at deploy time. Reject at the spec layer with a clear
+// "not yet implemented" error until provisioning lands.
+func TestNormalizeDBEngine_RejectsMySQLUntilProvisioned(t *testing.T) {
+	for _, in := range []string{"mysql", "mariadb", "MySQL", "MariaDB"} {
+		_, err := normalizeDBEngine(in)
+		if err == nil {
+			t.Errorf("%q: expected error (mysql provisioning not yet implemented)", in)
+			continue
+		}
+		if !strings.Contains(err.Error(), "not yet implemented") {
+			t.Errorf("%q: error should mention provisioning gap; got: %v", in, err)
 		}
 	}
 }
