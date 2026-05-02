@@ -1,14 +1,34 @@
+# Shared baseline browser security headers — applied to every block
+# below via `import baseline_security`. Same posture as the landing
+# snippet (platform/Caddyfile.landing-snippet) and the dashboard's
+# in-binary header set (cmd/ezkeel-web/main.go:setSecurityHeaders).
+#
+# Required for the HSTS preload submission at hstspreload.org — every
+# subdomain Caddy fronts must serve `Strict-Transport-Security` with
+# max-age >= 31536000, includeSubDomains, AND preload directives.
+(baseline_security) {
+    header {
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}
+
 {$FORGEJO_DOMAIN} {
+    import baseline_security
     reverse_proxy forgejo:3000
 }
 
 {$INFISICAL_DOMAIN} {
+    import baseline_security
     reverse_proxy infisical:8080
 }
 
 # Static pages hosting — each project gets a subdirectory
 # Access at: https://<FORGEJO_DOMAIN>/pages/<project>/
 {$FORGEJO_DOMAIN}/pages/* {
+    import baseline_security
     root * /srv/pages
     uri strip_prefix /pages
     file_server
