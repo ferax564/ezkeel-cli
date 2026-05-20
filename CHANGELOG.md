@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ezkeel server add user@host` runs the full bootstrap by default; `--hetzner` reuses the same SSH path after provisioning + waiting for sshd.
 
 ### Changed
+- Bumped the CLI Go toolchain to **1.26.3** to pick up standard-library
+  security fixes used by release builds.
 - `--bootstrap` flag default flipped from `false` to `true`. Pass `--bootstrap=false` to skip on a pre-baked box.
 - `--hetzner --bootstrap=false` is now rejected with an explicit error (a fresh Hetzner box requires bootstrap).
 - `ezkeel init <project>` now scaffolds an `ezkeel.yaml` next to the existing `workspace.yaml`.
@@ -21,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bootstrap commands now prefix privileged steps with `sudo -n` so a non-root SSH user (e.g. `ubuntu`/`debian` on AWS/Vultr/Scaleway) with passwordless sudo can run `ezkeel server add` end-to-end. Root SSH users are unaffected (`sudo -n` is a no-op as root).
 
 ### Fixed
+- `ezkeel env` now resolves to app environment-variable management instead of
+  the dev-container `environment` command.
 - Generated Dockerfile templates now honor `ezkeel.yaml` `build:` and (for Go/Rust) `start:` overrides instead of hardcoding `npm run build` / `go build ./...` / `cargo build --release` and `CMD ["./app"]`. Next.js, Vite/SPA, and Node SSR templates thread `build:` through; Go and Rust thread both `build:` and `start:` through.
 - `ezkeel.yaml` `resources.memory` and `resources.cpus` are now applied at deploy time when the equivalent `--memory` / `--cpus` CLI flag is unset. Previously they were parsed but discarded.
 - Bootstrap `agent_download` step single-quotes the agent URL so query strings containing `&` (e.g. presigned asset links) aren't treated as backgrounding operators by the remote login shell.
