@@ -9,9 +9,8 @@ import (
 )
 
 var environmentCmd = &cobra.Command{
-	Use:     "environment",
-	Aliases: []string{"env"},
-	Short:   "Manage the project's dev container environment",
+	Use:   "environment",
+	Short: "Manage the project's dev container environment",
 }
 
 var envBuildCmd = &cobra.Command{
