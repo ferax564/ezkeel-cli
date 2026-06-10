@@ -622,3 +622,24 @@ esac
 		t.Errorf("URL did not survive as a single argument to curl; output:\n%s", out)
 	}
 }
+
+// TestAgentURLVersionPin verifies Options.AgentVersion swaps the
+// always-latest release URL for a pinned tag, keeping the {ARCH}
+// placeholder so the runtime substitution still works, and that an
+// explicit AgentURL wins over the pin.
+func TestAgentURLVersionPin(t *testing.T) {
+	got := Options{AgentVersion: "v0.8.0"}.agentURL()
+	want := "https://github.com/ferax564/ezkeel-cli/releases/download/v0.8.0/ezkeel-agent-linux-{ARCH}"
+	if got != want {
+		t.Errorf("agentURL with version pin = %q, want %q", got, want)
+	}
+
+	got = Options{AgentURL: "https://x.example/agent", AgentVersion: "v0.8.0"}.agentURL()
+	if got != "https://x.example/agent" {
+		t.Errorf("explicit AgentURL must win over version pin; got %q", got)
+	}
+
+	if (Options{}).agentURL() != DefaultAgentURL {
+		t.Errorf("zero Options must fall back to DefaultAgentURL")
+	}
+}

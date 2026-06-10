@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -55,5 +56,41 @@ func TestClient_BuildSSHArgs(t *testing.T) {
 	secondLast := args[len(args)-2]
 	if secondLast != "ezkeel-agent" || last != "--request" {
 		t.Errorf("sshArgs: expected remote cmd at end, got %q %q", secondLast, last)
+	}
+}
+
+func TestStampProtocolVersion(t *testing.T) {
+	req := &Request{Type: CmdStatus}
+	stampProtocolVersion(req)
+	if req.ProtocolVersion != CurrentProtocolVersion {
+		t.Errorf("ProtocolVersion: got %d, want %d", req.ProtocolVersion, CurrentProtocolVersion)
+	}
+
+	// An explicit version set by the caller is preserved.
+	req = &Request{Type: CmdStatus, ProtocolVersion: 42}
+	stampProtocolVersion(req)
+	if req.ProtocolVersion != 42 {
+		t.Errorf("ProtocolVersion: got %d, want caller's 42", req.ProtocolVersion)
+	}
+}
+
+func TestWarnOnVersionSkew(t *testing.T) {
+	var warnings []string
+	c := &Client{Warn: func(format string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	}}
+
+	// Older agent (including pre-versioning version 0) triggers a warning.
+	c.warnOnVersionSkew(&Response{OK: true, ProtocolVersion: 0})
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want one skew warning", warnings)
+	}
+
+	// Same or newer protocol stays silent.
+	warnings = nil
+	c.warnOnVersionSkew(&Response{OK: true, ProtocolVersion: CurrentProtocolVersion})
+	c.warnOnVersionSkew(&Response{OK: true, ProtocolVersion: CurrentProtocolVersion + 1})
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %v, want none", warnings)
 	}
 }

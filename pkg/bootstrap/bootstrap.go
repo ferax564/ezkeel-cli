@@ -76,6 +76,10 @@ type Runner interface {
 // Options tunes the bootstrap. Zero values are sensible defaults.
 type Options struct {
 	AgentURL string // override the released agent binary URL
+	// AgentVersion pins the agent to a release tag (e.g. "v0.8.0")
+	// instead of always-latest, so a fleet can be rolled deliberately.
+	// Ignored when AgentURL is set. Empty means latest.
+	AgentVersion string
 }
 
 // Step is one named shell command in the bootstrap sequence. Exposed
@@ -88,6 +92,12 @@ type Step struct {
 func (o Options) agentURL() string {
 	if o.AgentURL != "" {
 		return o.AgentURL
+	}
+	if o.AgentVersion != "" {
+		return fmt.Sprintf(
+			"https://github.com/ferax564/ezkeel-cli/releases/download/%s/ezkeel-agent-linux-{ARCH}",
+			o.AgentVersion,
+		)
 	}
 	return DefaultAgentURL
 }

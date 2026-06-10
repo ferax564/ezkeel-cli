@@ -134,6 +134,93 @@ func TestRequest_RollbackSerialization(t *testing.T) {
 	}
 }
 
+// TestProtocolVersion_MissingFieldsUnmarshalToZero pins the
+// backward-compatibility contract: envelopes from peers that predate
+// protocol versioning carry no version fields at all, and those MUST
+// decode as version 0 so every old binary identifies itself by
+// construction.
+func TestProtocolVersion_MissingFieldsUnmarshalToZero(t *testing.T) {
+	var req Request
+	if err := json.Unmarshal([]byte(`{"type":"status"}`), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.ProtocolVersion != 0 {
+		t.Errorf("Request.ProtocolVersion: got %d, want 0", req.ProtocolVersion)
+	}
+
+	var resp Response
+	if err := json.Unmarshal([]byte(`{"ok":true}`), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.ProtocolVersion != 0 {
+		t.Errorf("Response.ProtocolVersion: got %d, want 0", resp.ProtocolVersion)
+	}
+	if resp.AgentVersion != "" {
+		t.Errorf("Response.AgentVersion: got %q, want empty", resp.AgentVersion)
+	}
+}
+
+func TestProtocolVersion_RoundTrip(t *testing.T) {
+	req := Request{ProtocolVersion: CurrentProtocolVersion, Type: CmdVersion}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got Request
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ProtocolVersion != CurrentProtocolVersion {
+		t.Errorf("ProtocolVersion: got %d, want %d", got.ProtocolVersion, CurrentProtocolVersion)
+	}
+
+	resp := Response{OK: true, ProtocolVersion: CurrentProtocolVersion, AgentVersion: "0.7.0"}
+	data, err = json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var gotResp Response
+	if err := json.Unmarshal(data, &gotResp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if gotResp.ProtocolVersion != CurrentProtocolVersion || gotResp.AgentVersion != "0.7.0" {
+		t.Errorf("got %+v", gotResp)
+	}
+}
+
+func TestRequest_UpdateSerialization(t *testing.T) {
+	req := Request{
+		Type: CmdUpdate,
+		Update: &UpdateRequest{
+			Version: "v0.8.0",
+			SHA256:  "abc123",
+		},
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got Request
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Update == nil || got.Update.Version != "v0.8.0" || got.Update.SHA256 != "abc123" {
+		t.Errorf("Update round-trip: %+v", got.Update)
+	}
+}
+
+func TestDBCreateRequest_ROPasswordOmittedWhenEmpty(t *testing.T) {
+	// Old agents must never see an unexpected ro_password key from
+	// callers that don't use the feature.
+	data, err := json.Marshal(DBCreateRequest{Database: "d", User: "u", Password: "p"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(data) != `{"engine":"","version":"","database":"d","user":"u","password":"p"}` {
+		t.Errorf("unexpected serialization: %s", data)
+	}
+}
+
 func TestResponse_Serialization(t *testing.T) {
 	resp := Response{
 		OK:      true,

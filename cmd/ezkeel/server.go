@@ -143,7 +143,7 @@ var serverAddCmd = &cobra.Command{
 			fmt.Println("Bootstrapping server (this can take ~60s on a fresh box)...")
 
 			runner := runnerForServer(srv)
-			if err := runBootstrap(ctx, runner, bootstrap.Options{}); err != nil {
+			if err := runBootstrap(ctx, runner, bootstrapOptions(cmd)); err != nil {
 				return fmt.Errorf("bootstrap: %w", err)
 			}
 
@@ -200,6 +200,54 @@ var serverListCmd = &cobra.Command{
 			}
 			fmt.Printf("%-20s %-30s %-10s %s\n", srv.Name, srv.Host, user, srv.Domain)
 		}
+		return nil
+	},
+}
+
+var serverUpdateAgentCmd = &cobra.Command{
+	Use:   "update-agent <name>",
+	Short: "Update the ezkeel-agent binary on a server",
+	Long: `Update the ezkeel-agent binary on a server to a released build.
+
+The agent downloads the new binary itself (honouring the host's
+EZKEEL_AGENT_DOWNLOAD_URL if set), verifies it against the release's
+SHA256SUMS, and atomically swaps it in. The new binary is picked up by
+the next agent invocation.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		srv, err := config.LoadServer(args[0])
+		if err != nil {
+			return err
+		}
+		client := clientFromServer(srv)
+		ctx := cmd.Context()
+
+		// Cheap side-effect-free probe first. Agents predating protocol
+		// versioning answer "unknown command type: version" — they also
+		// can't self-update, so point at the bootstrap path instead.
+		probe, err := client.Version(ctx)
+		if err != nil {
+			return fmt.Errorf("probing agent on %s: %w", srv.Name, err)
+		}
+		if !probe.OK {
+			return fmt.Errorf("agent on %s predates protocol versioning and cannot self-update — re-run `ezkeel server add` against this host to reinstall it (agent said: %s)", srv.Name, probe.Error)
+		}
+		fmt.Printf("current agent: v%s (protocol %d)\n", probe.AgentVersion, probe.ProtocolVersion)
+
+		ver, _ := cmd.Flags().GetString("agent-version")
+		dlURL, _ := cmd.Flags().GetString("url")
+		sha, _ := cmd.Flags().GetString("sha256")
+		resp, err := client.Send(ctx, &agent.Request{
+			Type:   agent.CmdUpdate,
+			Update: &agent.UpdateRequest{Version: ver, DownloadURL: dlURL, SHA256: sha},
+		})
+		if err != nil {
+			return fmt.Errorf("updating agent on %s: %w", srv.Name, err)
+		}
+		if !resp.OK {
+			return fmt.Errorf("agent update failed: %s", resp.Error)
+		}
+		fmt.Println(resp.Message)
 		return nil
 	},
 }
@@ -341,6 +389,21 @@ func runBootstrap(ctx context.Context, runner bootstrap.Runner, opts bootstrap.O
 	return bootstrap.Run(ctx, runner, opts)
 }
 
+// bootstrapOptions resolves which agent binary bootstrap installs:
+// --agent-version flag, then the EZKEEL_AGENT_VERSION /
+// EZKEEL_AGENT_DOWNLOAD_URL environment variables, then the latest
+// release. An explicit URL wins over a version pin inside bootstrap.
+func bootstrapOptions(cmd *cobra.Command) bootstrap.Options {
+	agentVersion, _ := cmd.Flags().GetString("agent-version")
+	if agentVersion == "" {
+		agentVersion = os.Getenv("EZKEEL_AGENT_VERSION")
+	}
+	return bootstrap.Options{
+		AgentURL:     os.Getenv("EZKEEL_AGENT_DOWNLOAD_URL"),
+		AgentVersion: agentVersion,
+	}
+}
+
 // waitForSSH polls probe up to maxAttempts times, sleeping delay
 // between attempts, returning nil on the first success. delay=0 is
 // useful for tests so they don't sleep.
@@ -369,7 +432,12 @@ func init() {
 	serverAddCmd.Flags().String("hetzner-type", "cx22", "Hetzner server type (cx22=2vCPU/4GB, cx32=4vCPU/8GB)")
 	serverAddCmd.Flags().String("hetzner-location", "fsn1", "Hetzner datacenter (fsn1, nbg1, hel1)")
 	serverAddCmd.Flags().String("hetzner-ssh-key", "", "Name of SSH key in Hetzner Cloud console")
+	serverAddCmd.Flags().String("agent-version", "", "Pin the ezkeel-agent release to install (e.g. v0.8.0; default latest, or EZKEEL_AGENT_VERSION env)")
+	serverUpdateAgentCmd.Flags().String("agent-version", "", "Release tag to install (e.g. v0.8.0; default latest)")
+	serverUpdateAgentCmd.Flags().String("url", "", "Download the agent binary from this URL instead of GitHub releases")
+	serverUpdateAgentCmd.Flags().String("sha256", "", "Expected SHA256 of the new binary (default: looked up in the release's SHA256SUMS)")
 	serverCmd.AddCommand(serverAddCmd)
 	serverCmd.AddCommand(serverListCmd)
 	serverCmd.AddCommand(serverSSHCmd)
+	serverCmd.AddCommand(serverUpdateAgentCmd)
 }
