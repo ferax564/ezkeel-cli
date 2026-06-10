@@ -29,9 +29,16 @@ case "$ARCH" in
     ;;
 esac
 
-# Get latest release tag
-echo "Detecting latest EZKeel release..."
-TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+# Resolve release tag — EZKEEL_VERSION pins an exact release (e.g.
+# EZKEEL_VERSION=v0.7.0 sh install.sh) so fleets can be rolled
+# deliberately; otherwise the latest release is used.
+if [ -n "$EZKEEL_VERSION" ]; then
+  TAG="$EZKEEL_VERSION"
+  echo "Installing pinned EZKeel release ${TAG}..."
+else
+  echo "Detecting latest EZKeel release..."
+  TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+fi
 
 if [ -z "$TAG" ]; then
   echo "Error: could not determine latest release"

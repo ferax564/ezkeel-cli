@@ -4,14 +4,15 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/ferax564/ezkeel-cli/pkg/agent"
 	"github.com/ferax564/ezkeel-cli/internal/version"
+	"github.com/ferax564/ezkeel-cli/pkg/agent"
 )
 
 // validIdentifier matches safe PostgreSQL identifiers: starts with letter or
@@ -39,9 +40,36 @@ func pgContainerName() string {
 	return "ezkeel-postgres-1"
 }
 
+// runner abstracts process execution so handlers can be tested without
+// docker (or root) on the host. The method shapes mirror the exec.Cmd
+// calls the handlers were written against.
+type runner interface {
+	// Output returns the command's stdout only.
+	Output(name string, args ...string) ([]byte, error)
+	// CombinedOutput returns interleaved stdout+stderr.
+	CombinedOutput(name string, args ...string) ([]byte, error)
+	// Run discards output and reports only the exit status.
+	Run(name string, args ...string) error
+}
+
+// systemRunner is the production runner backed by os/exec.
+type systemRunner struct{}
+
+func (systemRunner) Output(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).Output()
+}
+
+func (systemRunner) CombinedOutput(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
+
+func (systemRunner) Run(name string, args ...string) error {
+	return exec.Command(name, args...).Run()
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--request" {
-		handleRequest()
+		handleRequest(os.Stdin, os.Stdout)
 		return
 	}
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
@@ -52,61 +80,87 @@ func main() {
 	os.Exit(1)
 }
 
-func handleRequest() {
+// handleRequest decodes one request from in, dispatches it, stamps the
+// response with this agent's protocol and build versions, and encodes
+// it to out.
+func handleRequest(in io.Reader, out io.Writer) {
+	var resp *agent.Response
+
 	var req agent.Request
-	dec := json.NewDecoder(os.Stdin)
-	if err := dec.Decode(&req); err != nil {
-		writeError("failed to decode request: " + err.Error())
-		return
+	if err := json.NewDecoder(in).Decode(&req); err != nil {
+		resp = respErr("failed to decode request: " + err.Error())
+	} else {
+		resp = dispatch(systemRunner{}, &req)
+	}
+
+	resp.ProtocolVersion = agent.CurrentProtocolVersion
+	resp.AgentVersion = version.Version
+	json.NewEncoder(out).Encode(resp) //nolint:errcheck
+}
+
+// dispatch routes a decoded request to its handler and returns the
+// response to send.
+func dispatch(r runner, req *agent.Request) *agent.Response {
+	// Reject requests from a NEWER protocol than this build understands:
+	// they may carry command types or fields we'd silently mishandle.
+	// Older (including pre-versioning, version 0) requests are fine —
+	// the protocol only grows additively.
+	if req.ProtocolVersion > agent.CurrentProtocolVersion {
+		return respErr(fmt.Sprintf(
+			"request speaks protocol version %d but this agent (v%s) only speaks %d — update the agent first",
+			req.ProtocolVersion, version.Version, agent.CurrentProtocolVersion,
+		))
 	}
 
 	switch req.Type {
 	case agent.CmdDeploy:
 		if req.Deploy == nil {
-			writeError("deploy request missing deploy payload")
-			return
+			return respErr("deploy request missing deploy payload")
 		}
-		handleDeploy(req.Deploy)
+		return handleDeploy(r, req.Deploy)
 	case agent.CmdStop:
 		if req.Stop == nil {
-			writeError("stop request missing stop payload")
-			return
+			return respErr("stop request missing stop payload")
 		}
-		handleStop(req.Stop)
+		return handleStop(r, req.Stop)
 	case agent.CmdStatus:
-		handleStatus()
+		return handleStatus(r)
 	case agent.CmdLogs:
 		if req.Logs == nil {
-			writeError("logs request missing logs payload")
-			return
+			return respErr("logs request missing logs payload")
 		}
-		handleLogs(req.Logs)
+		return handleLogs(r, req.Logs)
 	case agent.CmdDBCreate:
 		if req.DBCreate == nil {
-			writeError("db_create request missing db_create payload")
-			return
+			return respErr("db_create request missing db_create payload")
 		}
-		handleDBCreate(req.DBCreate)
+		return handleDBCreate(r, req.DBCreate)
 	case agent.CmdDBMigrate:
 		if req.DBMigrate == nil {
-			writeError("db_migrate request missing db_migrate payload")
-			return
+			return respErr("db_migrate request missing db_migrate payload")
 		}
-		handleDBMigrate(req.DBMigrate)
+		return handleDBMigrate(r, req.DBMigrate)
 	case agent.CmdDBBackup:
 		if req.DBBackup == nil {
-			writeError("db_backup request missing payload")
-			return
+			return respErr("db_backup request missing payload")
 		}
-		handleDBBackup(req.DBBackup)
+		return handleDBBackup(r, req.DBBackup)
 	case agent.CmdRollback:
 		if req.Rollback == nil {
-			writeError("rollback request missing rollback payload")
-			return
+			return respErr("rollback request missing rollback payload")
 		}
-		handleRollback(req.Rollback)
+		return handleRollback(r, req.Rollback)
+	case agent.CmdVersion:
+		return handleVersion()
+	case agent.CmdUpdate:
+		// A nil payload is a valid "update to latest" request.
+		upd := req.Update
+		if upd == nil {
+			upd = &agent.UpdateRequest{}
+		}
+		return handleUpdate(r, upd, defaultUpdateOptions())
 	default:
-		writeError("unknown command type: " + string(req.Type))
+		return respErr("unknown command type: " + string(req.Type))
 	}
 }
 
@@ -130,9 +184,9 @@ func prevImageTag(appName string) string {
 }
 
 // stopAndRemove stops and removes a container, ignoring errors (container may not exist).
-func stopAndRemove(name string) {
-	exec.Command("docker", "stop", name).Run() //nolint:errcheck
-	exec.Command("docker", "rm", name).Run()   //nolint:errcheck
+func stopAndRemove(r runner, name string) {
+	r.Run("docker", "stop", name) //nolint:errcheck
+	r.Run("docker", "rm", name)   //nolint:errcheck
 }
 
 // buildRunArgs constructs the docker run argument list for an app container.
@@ -156,58 +210,64 @@ func buildRunArgs(name string, port int, memory, cpus string, env map[string]str
 	return args
 }
 
-func handleDeploy(req *agent.DeployRequest) {
+func handleDeploy(r runner, req *agent.DeployRequest) *agent.Response {
 	name := containerName(req.AppName)
 	prevTag := prevImageTag(req.AppName)
 
-	inspectOut, err := exec.Command("docker", "inspect", "--format", "{{.Config.Image}}", name).Output()
+	// Tag the currently-running image as :prev so rollback has a target.
+	// A failed tag is NOT fatal to the deploy, but it must be surfaced:
+	// auto-rollback depends on :prev existing, so the operator needs to
+	// know it won't be available for this app.
+	tagWarning := ""
+	inspectOut, err := r.Output("docker", "inspect", "--format", "{{.Config.Image}}", name)
 	if err == nil {
 		currentImage := strings.TrimSpace(string(inspectOut))
 		if currentImage != "" {
-			exec.Command("docker", "tag", currentImage, prevTag).Run() //nolint:errcheck
+			if tagOut, tagErr := r.CombinedOutput("docker", "tag", currentImage, prevTag); tagErr != nil {
+				tagWarning = fmt.Sprintf(
+					"; warning: could not tag %s as %s — rollback will not be available for this deploy: %s: %s",
+					currentImage, prevTag, tagErr.Error(), strings.TrimSpace(string(tagOut)),
+				)
+			}
 		}
 	}
 
-	stopAndRemove(name)
+	stopAndRemove(r, name)
 
 	args := buildRunArgs(name, req.Port, req.Memory, req.CPUs, req.Env, req.ImageTag)
-	out, runErr := exec.Command("docker", args...).CombinedOutput()
+	out, runErr := r.CombinedOutput("docker", args...)
 	if runErr != nil {
-		writeError(fmt.Sprintf("docker run failed: %s: %s", runErr.Error(), string(out)))
-		return
+		return respErr(fmt.Sprintf("docker run failed: %s: %s", runErr.Error(), string(out)))
 	}
 
-	writeOK(fmt.Sprintf("deployed %s (%s) on network ezkeel-apps", req.AppName, req.ImageTag))
+	return respOK(fmt.Sprintf("deployed %s (%s) on network ezkeel-apps%s", req.AppName, req.ImageTag, tagWarning))
 }
 
-func handleStop(req *agent.StopRequest) {
+func handleStop(r runner, req *agent.StopRequest) *agent.Response {
 	name := containerName(req.AppName)
 
-	out, err := exec.Command("docker", "stop", name).CombinedOutput()
+	out, err := r.CombinedOutput("docker", "stop", name)
 	if err != nil {
-		writeError(fmt.Sprintf("docker stop failed: %s: %s", err.Error(), string(out)))
-		return
+		return respErr(fmt.Sprintf("docker stop failed: %s: %s", err.Error(), string(out)))
 	}
 
-	out, err = exec.Command("docker", "rm", name).CombinedOutput()
+	out, err = r.CombinedOutput("docker", "rm", name)
 	if err != nil {
-		writeError(fmt.Sprintf("docker rm failed: %s: %s", err.Error(), string(out)))
-		return
+		return respErr(fmt.Sprintf("docker rm failed: %s: %s", err.Error(), string(out)))
 	}
 
-	writeOK("stopped " + req.AppName)
+	return respOK("stopped " + req.AppName)
 }
 
-func handleStatus() {
+func handleStatus(r runner) *agent.Response {
 	// List all ezkeel- containers (running and stopped).
-	out, err := exec.Command(
+	out, err := r.Output(
 		"docker", "ps", "-a",
 		"--filter", "name=ezkeel-",
 		"--format", "{{.Names}}\t{{.Status}}\t{{.Ports}}",
-	).Output()
+	)
 	if err != nil {
-		writeError("docker ps failed: " + err.Error())
-		return
+		return respErr("docker ps failed: " + err.Error())
 	}
 
 	var apps []agent.AppStatus
@@ -256,12 +316,7 @@ func handleStatus() {
 		})
 	}
 
-	resp := agent.Response{
-		OK:   true,
-		Apps: apps,
-	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.Encode(resp) //nolint:errcheck
+	return &agent.Response{OK: true, Apps: apps}
 }
 
 // parsePort extracts the host port from a Docker ports string like
@@ -285,21 +340,20 @@ func parsePort(ports string) int {
 	return p
 }
 
-func handleLogs(req *agent.LogsRequest) {
+func handleLogs(r runner, req *agent.LogsRequest) *agent.Response {
 	name := containerName(req.AppName)
 	lines := req.Lines
 	if lines <= 0 {
 		lines = 100
 	}
 
-	out, err := exec.Command(
+	out, err := r.CombinedOutput(
 		"docker", "logs",
 		"--tail", strconv.Itoa(lines),
 		name,
-	).CombinedOutput()
+	)
 	if err != nil {
-		writeError(fmt.Sprintf("docker logs failed: %s: %s", err.Error(), string(out)))
-		return
+		return respErr(fmt.Sprintf("docker logs failed: %s: %s", err.Error(), string(out)))
 	}
 
 	var logLines []string
@@ -308,45 +362,42 @@ func handleLogs(req *agent.LogsRequest) {
 		logLines = append(logLines, scanner.Text())
 	}
 
-	resp := agent.Response{
-		OK:   true,
-		Logs: logLines,
-	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.Encode(resp) //nolint:errcheck
+	return &agent.Response{OK: true, Logs: logLines}
 }
 
-func handleDBCreate(req *agent.DBCreateRequest) {
+func handleDBCreate(r runner, req *agent.DBCreateRequest) *agent.Response {
 	// Validate identifiers to prevent SQL injection.
 	if !validIdentifier.MatchString(req.User) {
-		writeError(fmt.Sprintf("invalid database user name: %q", req.User))
-		return
+		return respErr(fmt.Sprintf("invalid database user name: %q", req.User))
 	}
 	if !validIdentifier.MatchString(req.Database) {
-		writeError(fmt.Sprintf("invalid database name: %q", req.Database))
-		return
+		return respErr(fmt.Sprintf("invalid database name: %q", req.Database))
 	}
 	if req.Password == "" {
-		writeError("database password must not be empty")
-		return
+		return respErr("database password must not be empty")
+	}
+	roUser := req.User + "_ro"
+	if req.ROPassword != "" && !validIdentifier.MatchString(roUser) {
+		// The _ro suffix can push an otherwise-valid 62/63-char user
+		// name past Postgres's identifier limit.
+		return respErr(fmt.Sprintf("invalid read-only role name: %q", roUser))
 	}
 
 	// Start the postgres container if it is not already running.
-	checkOut, _ := exec.Command(
+	checkOut, _ := r.Output(
 		"docker", "ps", "-q", "--filter", "name="+pgContainerName(),
-	).Output()
+	)
 
 	if strings.TrimSpace(string(checkOut)) == "" {
 		// Container is not running — start or create it.
-		version := req.Version
-		if version == "" {
-			version = "16"
+		pgVersion := req.Version
+		if pgVersion == "" {
+			pgVersion = "16"
 		}
-		if !validIdentifier.MatchString(version) {
-			writeError(fmt.Sprintf("invalid postgres version: %q", version))
-			return
+		if !validIdentifier.MatchString(pgVersion) {
+			return respErr(fmt.Sprintf("invalid postgres version: %q", pgVersion))
 		}
-		image := fmt.Sprintf("postgres:%s-alpine", version)
+		image := fmt.Sprintf("postgres:%s-alpine", pgVersion)
 
 		startArgs := []string{
 			"run", "-d",
@@ -355,16 +406,15 @@ func handleDBCreate(req *agent.DBCreateRequest) {
 		}
 		startArgs = append(startArgs, image)
 
-		out, err := exec.Command("docker", startArgs...).CombinedOutput()
+		out, err := r.CombinedOutput("docker", startArgs...)
 		if err != nil {
 			// Container may already exist but be stopped — try starting it.
-			out2, err2 := exec.Command("docker", "start", pgContainerName()).CombinedOutput()
+			out2, err2 := r.CombinedOutput("docker", "start", pgContainerName())
 			if err2 != nil {
-				writeError(fmt.Sprintf(
+				return respErr(fmt.Sprintf(
 					"could not start postgres container: run: %s (%s), start: %s (%s)",
 					err.Error(), string(out), err2.Error(), string(out2),
 				))
-				return
 			}
 		}
 	}
@@ -375,96 +425,157 @@ func handleDBCreate(req *agent.DBCreateRequest) {
 		"CREATE USER %s WITH PASSWORD '%s';",
 		req.User, escapeSQLString(req.Password),
 	)
-	exec.Command( //nolint:errcheck
+	r.Run( //nolint:errcheck
 		"docker", "exec", pgContainerName(),
 		"psql", "-U", "ezkeel", "-c", createUserSQL,
-	).Run()
+	)
 
 	// Create database owned by user (both identifiers validated above).
+	dbExisted := false
 	createDBSQL := fmt.Sprintf(
 		"CREATE DATABASE %s OWNER %s;",
 		req.Database, req.User,
 	)
-	out, err := exec.Command(
+	out, err := r.CombinedOutput(
 		"docker", "exec", pgContainerName(),
 		"psql", "-U", "ezkeel", "-c", createDBSQL,
-	).CombinedOutput()
+	)
 	if err != nil {
 		// Database may already exist — treat as success if output says so.
-		if strings.Contains(string(out), "already exists") {
-			writeOK(fmt.Sprintf("database %s already exists", req.Database))
-			return
+		if !strings.Contains(string(out), "already exists") {
+			return respErr(fmt.Sprintf("create database failed: %s: %s", err.Error(), string(out)))
 		}
-		writeError(fmt.Sprintf("create database failed: %s: %s", err.Error(), string(out)))
-		return
+		dbExisted = true
 	}
 
-	writeOK(fmt.Sprintf("created database %s with user %s", req.Database, req.User))
+	// Optionally provision the read-only companion role. Runs in the
+	// already-exists path too, so re-issuing db_create with ro_password
+	// retrofits the role onto an existing database.
+	if req.ROPassword != "" {
+		if resp := createReadOnlyRole(r, req, roUser); resp != nil {
+			return resp
+		}
+	}
+
+	if dbExisted {
+		msg := fmt.Sprintf("database %s already exists", req.Database)
+		if req.ROPassword != "" {
+			msg += fmt.Sprintf("; read-only role %s ensured", roUser)
+		}
+		return respOK(msg)
+	}
+	msg := fmt.Sprintf("created database %s with user %s", req.Database, req.User)
+	if req.ROPassword != "" {
+		msg += fmt.Sprintf(" and read-only role %s", roUser)
+	}
+	return respOK(msg)
 }
 
-func handleDBMigrate(req *agent.DBMigrateRequest) {
+// createReadOnlyRole provisions roUser as a SELECT-only login role on
+// req.Database: CONNECT + USAGE on schema public + SELECT on current
+// tables, plus a default privilege so tables req.User creates later are
+// covered. Idempotent — CREATE USER failure is ignored like the
+// read-write branch, and GRANT/ALTER DEFAULT PRIVILEGES re-apply
+// cleanly. Returns nil on success, an error response otherwise (the
+// grants are the security boundary, so unlike the role creation their
+// failures are fatal).
+func createReadOnlyRole(r runner, req *agent.DBCreateRequest, roUser string) *agent.Response {
+	createRoSQL := fmt.Sprintf(
+		"CREATE USER %s WITH PASSWORD '%s';",
+		roUser, escapeSQLString(req.ROPassword),
+	)
+	r.Run( //nolint:errcheck
+		"docker", "exec", pgContainerName(),
+		"psql", "-U", "ezkeel", "-c", createRoSQL,
+	)
+
+	grants := []struct {
+		db  string // "" = default maintenance database
+		sql string
+	}{
+		{"", fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s;", req.Database, roUser)},
+		{req.Database, fmt.Sprintf("GRANT USAGE ON SCHEMA public TO %s;", roUser)},
+		{req.Database, fmt.Sprintf("GRANT SELECT ON ALL TABLES IN SCHEMA public TO %s;", roUser)},
+		{req.Database, fmt.Sprintf(
+			"ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA public GRANT SELECT ON TABLES TO %s;",
+			req.User, roUser,
+		)},
+	}
+	for _, g := range grants {
+		args := []string{"exec", pgContainerName(), "psql", "-U", "ezkeel"}
+		if g.db != "" {
+			args = append(args, "-d", g.db)
+		}
+		args = append(args, "-c", g.sql)
+		if out, err := r.CombinedOutput("docker", args...); err != nil {
+			return respErr(fmt.Sprintf("read-only role grant failed (%s): %s: %s", g.sql, err.Error(), string(out)))
+		}
+	}
+	return nil
+}
+
+func handleDBMigrate(r runner, req *agent.DBMigrateRequest) *agent.Response {
 	name := containerName(req.AppName)
 
-	// Split the migrate command into tokens for exec.
-	parts := strings.Fields(req.MigrateCmd)
+	// Split the migrate command into tokens for exec, honouring shell
+	// quoting so commands like `rails runner "puts 'x'"` survive intact.
+	parts, err := splitShellWords(req.MigrateCmd)
+	if err != nil {
+		return respErr("invalid migrate_cmd: " + err.Error())
+	}
 	if len(parts) == 0 {
-		writeError("migrate_cmd is empty")
-		return
+		return respErr("migrate_cmd is empty")
 	}
 
 	args := append([]string{"exec", name}, parts...)
-	out, err := exec.Command("docker", args...).CombinedOutput()
+	out, err := r.CombinedOutput("docker", args...)
 	if err != nil {
-		writeError(fmt.Sprintf("migration failed: %s: %s", err.Error(), string(out)))
-		return
+		return respErr(fmt.Sprintf("migration failed: %s: %s", err.Error(), string(out)))
 	}
 
-	writeOK("migration completed: " + strings.TrimSpace(string(out)))
+	return respOK("migration completed: " + strings.TrimSpace(string(out)))
 }
 
-func handleDBBackup(req *agent.DBBackupRequest) {
-	cmd := exec.Command("docker", "exec", pgContainerName(),
+func handleDBBackup(r runner, req *agent.DBBackupRequest) *agent.Response {
+	out, err := r.Output("docker", "exec", pgContainerName(),
 		"pg_dump", "-U", "ezkeel", req.Database)
-	out, err := cmd.Output()
 	if err != nil {
-		writeError(fmt.Sprintf("pg_dump failed: %v", err))
-		return
+		return respErr(fmt.Sprintf("pg_dump failed: %v", err))
 	}
 	msg := fmt.Sprintf("backup of %s (%d bytes)", req.Database, len(out))
-	resp := agent.Response{OK: true, Message: msg, Logs: []string{string(out)}}
-	enc := json.NewEncoder(os.Stdout)
-	enc.Encode(resp) //nolint:errcheck
+	return &agent.Response{OK: true, Message: msg, Logs: []string{string(out)}}
 }
 
-func handleRollback(req *agent.RollbackRequest) {
+func handleRollback(r runner, req *agent.RollbackRequest) *agent.Response {
 	name := containerName(req.AppName)
 	prevTag := prevImageTag(req.AppName)
 
-	if err := exec.Command("docker", "image", "inspect", prevTag).Run(); err != nil {
-		writeError(fmt.Sprintf("no previous image found for %s — nothing to roll back to", req.AppName))
-		return
+	if err := r.Run("docker", "image", "inspect", prevTag); err != nil {
+		return respErr(fmt.Sprintf("no previous image found for %s — nothing to roll back to", req.AppName))
 	}
 
-	stopAndRemove(name)
+	stopAndRemove(r, name)
 
 	args := buildRunArgs(name, req.Port, req.Memory, req.CPUs, nil, prevTag)
-	out, err := exec.Command("docker", args...).CombinedOutput()
+	out, err := r.CombinedOutput("docker", args...)
 	if err != nil {
-		writeError(fmt.Sprintf("rollback failed: %s: %s", err.Error(), string(out)))
-		return
+		return respErr(fmt.Sprintf("rollback failed: %s: %s", err.Error(), string(out)))
 	}
 
-	writeOK(fmt.Sprintf("rolled back %s to previous version", req.AppName))
+	return respOK(fmt.Sprintf("rolled back %s to previous version", req.AppName))
 }
 
-func writeOK(msg string) {
-	resp := agent.Response{OK: true, Message: msg}
-	enc := json.NewEncoder(os.Stdout)
-	enc.Encode(resp) //nolint:errcheck
+// handleVersion answers the side-effect-free version probe. The
+// interesting data (agent_version, protocol_version) is stamped on
+// every response by handleRequest; the message is for humans.
+func handleVersion() *agent.Response {
+	return respOK(fmt.Sprintf("ezkeel-agent v%s (protocol %d)", version.Version, agent.CurrentProtocolVersion))
 }
 
-func writeError(msg string) {
-	resp := agent.Response{OK: false, Error: msg}
-	enc := json.NewEncoder(os.Stdout)
-	enc.Encode(resp) //nolint:errcheck
+func respOK(msg string) *agent.Response {
+	return &agent.Response{OK: true, Message: msg}
+}
+
+func respErr(msg string) *agent.Response {
+	return &agent.Response{OK: false, Error: msg}
 }

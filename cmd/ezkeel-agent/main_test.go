@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/ferax564/ezkeel-cli/pkg/agent"
@@ -162,16 +163,29 @@ func TestWriteError_Format(t *testing.T) {
 	}
 }
 
-func TestHandleRequest_UnknownCommand(t *testing.T) {
-	req := agent.Request{Type: "nonexistent"}
-	if req.Type != "nonexistent" {
-		t.Errorf("req.Type = %q, want %q", req.Type, "nonexistent")
+// TestHandleRequest_StampsVersions drives the full decode→dispatch→
+// encode path and pins the contract that EVERY response — including
+// errors — carries the agent's protocol and build versions, so clients
+// can always detect skew.
+func TestHandleRequest_StampsVersions(t *testing.T) {
+	cases := []string{
+		`{"type":"version"}`,     // success path
+		`{"type":"nonexistent"}`, // error path
+		`not json at all`,        // decode failure path
 	}
-}
+	for _, input := range cases {
+		var out strings.Builder
+		handleRequest(strings.NewReader(input), &out)
 
-func TestHandleRequest_MissingPayload(t *testing.T) {
-	req := agent.Request{Type: agent.CmdDeploy, Deploy: nil}
-	if req.Deploy != nil {
-		t.Errorf("req.Deploy should be nil")
+		var resp agent.Response
+		if err := json.Unmarshal([]byte(out.String()), &resp); err != nil {
+			t.Fatalf("input %q: response is not valid JSON: %v", input, err)
+		}
+		if resp.ProtocolVersion != agent.CurrentProtocolVersion {
+			t.Errorf("input %q: ProtocolVersion = %d, want %d", input, resp.ProtocolVersion, agent.CurrentProtocolVersion)
+		}
+		if resp.AgentVersion == "" {
+			t.Errorf("input %q: AgentVersion is empty", input)
+		}
 	}
 }

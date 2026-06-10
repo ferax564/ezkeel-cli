@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 )
 
@@ -14,6 +15,11 @@ type Client struct {
 	User     string
 	SSHKey   string
 	SSHAlias string // if set, uses "ssh <alias>" — respects full SSH config
+
+	// Warn receives human-readable compatibility warnings (e.g. the
+	// agent speaks an older protocol version than this client). Nil
+	// means write to stderr.
+	Warn func(format string, args ...any)
 }
 
 // NewClient returns a new Client targeting the given host.
@@ -48,7 +54,12 @@ func (c *Client) sshArgs(remoteCmd ...string) []string {
 // Send marshals req, pipes it to "ezkeel-agent --request" on the remote host
 // via SSH, and parses the JSON response. The context controls the SSH process
 // lifetime — if the context is canceled, the SSH process is killed.
+//
+// Send stamps the request with CurrentProtocolVersion (unless the caller
+// already set one) and warns via c.Warn when the responding agent speaks
+// an older protocol than this client.
 func (c *Client) Send(ctx context.Context, req *Request) (*Response, error) {
+	stampProtocolVersion(req)
 	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -67,7 +78,42 @@ func (c *Client) Send(ctx context.Context, req *Request) (*Response, error) {
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return nil, fmt.Errorf("unmarshal response: %w", err)
 	}
+	c.warnOnVersionSkew(&resp)
 	return &resp, nil
+}
+
+// Version probes the agent's version and protocol version without side
+// effects. Agents predating protocol versioning answer with an "unknown
+// command type" error response; callers should treat that as protocol
+// version 0.
+func (c *Client) Version(ctx context.Context) (*Response, error) {
+	return c.Send(ctx, &Request{Type: CmdVersion})
+}
+
+// stampProtocolVersion fills in the request's protocol version when the
+// caller didn't set one explicitly.
+func stampProtocolVersion(req *Request) {
+	if req.ProtocolVersion == 0 {
+		req.ProtocolVersion = CurrentProtocolVersion
+	}
+}
+
+// warnOnVersionSkew emits a warning when the agent that produced resp
+// speaks an older protocol than this client. A newer agent responding
+// to an older client is not warned about here — the agent stays
+// backward-compatible with old requests by construction.
+func (c *Client) warnOnVersionSkew(resp *Response) {
+	if resp.ProtocolVersion >= CurrentProtocolVersion {
+		return
+	}
+	warn := c.Warn
+	if warn == nil {
+		warn = func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
+		}
+	}
+	warn("remote ezkeel-agent speaks protocol version %d (client speaks %d) — update it with `ezkeel server update-agent`",
+		resp.ProtocolVersion, CurrentProtocolVersion)
 }
 
 // UploadImage streams a Docker image to the remote host using "docker save | ssh docker load".
