@@ -526,6 +526,113 @@ func TestResolveResources_EmptySpecResources(t *testing.T) {
 	}
 }
 
+func TestMergeDeployEnv_Precedence(t *testing.T) {
+	// manifest < spec < flag — the flag wins on collision.
+	manifestEnv := map[string]string{
+		"FROM_MANIFEST": "m",
+		"SHARED":        "manifest",
+		"FLAGGED":       "manifest",
+	}
+	s := &spec.Spec{Name: "x", Env: []string{"FROM_SPEC=s", "SHARED=spec", "FLAGGED=spec"}}
+	flagEnv := []string{"FROM_FLAG=f", "FLAGGED=flag"}
+
+	env, err := mergeDeployEnv(manifestEnv, s, flagEnv)
+	if err != nil {
+		t.Fatalf("mergeDeployEnv: %v", err)
+	}
+	want := map[string]string{
+		"FROM_MANIFEST": "m",
+		"FROM_SPEC":     "s",
+		"FROM_FLAG":     "f",
+		"SHARED":        "spec",
+		"FLAGGED":       "flag",
+	}
+	for k, v := range want {
+		if env[k] != v {
+			t.Errorf("env[%s] = %q, want %q", k, env[k], v)
+		}
+	}
+	if len(env) != len(want) {
+		t.Errorf("env = %v, want exactly %v", env, want)
+	}
+}
+
+func TestMergeDeployEnv_InvalidFlagEntry(t *testing.T) {
+	for _, entry := range []string{"NOEQUALS", "1BAD=x", "BA-D=x", "=x"} {
+		if _, err := mergeDeployEnv(nil, nil, []string{entry}); err == nil {
+			t.Errorf("mergeDeployEnv with --env %q expected error, got nil", entry)
+		}
+	}
+}
+
+func TestMergeDeployEnv_NilInputs(t *testing.T) {
+	env, err := mergeDeployEnv(nil, nil, nil)
+	if err != nil {
+		t.Fatalf("mergeDeployEnv: %v", err)
+	}
+	if len(env) != 0 {
+		t.Errorf("env = %v, want empty", env)
+	}
+}
+
+func TestMergeDeployEnv_DoesNotMutateManifestEnv(t *testing.T) {
+	manifestEnv := map[string]string{"KEY": "old"}
+	if _, err := mergeDeployEnv(manifestEnv, nil, []string{"KEY=new"}); err != nil {
+		t.Fatalf("mergeDeployEnv: %v", err)
+	}
+	if manifestEnv["KEY"] != "old" {
+		t.Errorf("manifest env mutated to %q — merge must copy", manifestEnv["KEY"])
+	}
+}
+
+func TestMigratorHint_PerMigrator(t *testing.T) {
+	cases := []struct {
+		migrator detect.Migrator
+		want     string
+	}{
+		{detect.MigratorPrisma, "npx prisma migrate deploy"},
+		{detect.MigratorDrizzle, "npx drizzle-kit migrate"},
+		{detect.MigratorAlembic, "alembic upgrade head"},
+		{detect.MigratorDjango, "python manage.py migrate"},
+		{detect.MigratorNone, ""},
+	}
+	for _, c := range cases {
+		got := migratorHint(&detect.DatabaseResult{Migrator: c.migrator})
+		if got != c.want {
+			t.Errorf("migratorHint(%q) = %q, want %q", c.migrator, got, c.want)
+		}
+	}
+}
+
+func TestMigratorHint_PrefersDetectorMigrateCmd(t *testing.T) {
+	got := migratorHint(&detect.DatabaseResult{
+		Migrator:   detect.MigratorPrisma,
+		MigrateCmd: "npx prisma migrate deploy --schema custom.prisma",
+	})
+	if got != "npx prisma migrate deploy --schema custom.prisma" {
+		t.Errorf("got %q, want the detector's MigrateCmd verbatim", got)
+	}
+}
+
+func TestMigratorHint_NilResult(t *testing.T) {
+	if got := migratorHint(nil); got != "" {
+		t.Errorf("got %q, want empty for nil result", got)
+	}
+}
+
+func TestMigrationWarning(t *testing.T) {
+	got := migrationWarning(detect.MigratorPrisma, "npx prisma migrate deploy")
+	if !strings.HasPrefix(got, "WARNING: prisma migrations detected") {
+		t.Errorf("missing loud prefix: %q", got)
+	}
+	if !strings.Contains(got, "does not run migrations automatically") {
+		t.Errorf("missing no-auto-migrations statement: %q", got)
+	}
+	if !strings.Contains(got, "npx prisma migrate deploy") {
+		t.Errorf("missing hint: %q", got)
+	}
+}
+
 func TestFormatDryRun(t *testing.T) {
 	info := dryRunInfo{
 		AppName:    "my-app",

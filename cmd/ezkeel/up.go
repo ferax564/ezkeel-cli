@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ferax564/ezkeel-cli/pkg/agent"
 	"github.com/ferax564/ezkeel-cli/internal/config"
 	"github.com/ferax564/ezkeel-cli/internal/detect"
 	"github.com/ferax564/ezkeel-cli/internal/spec"
 	"github.com/ferax564/ezkeel-cli/internal/tui"
+	"github.com/ferax564/ezkeel-cli/pkg/agent"
 	"github.com/ferax564/ezkeel-cli/pkg/templates"
 	"github.com/spf13/cobra"
 )
@@ -76,7 +76,13 @@ in your dependencies, and DATABASE_URL is injected at deploy time.`,
   ezkeel up --dry-run
 
   # Pin resources for a memory-tight box
-  ezkeel up --memory 256m --cpus 0.5`,
+  ezkeel up --memory 256m --cpus 0.5
+
+  # Set env vars for this deploy (repeatable; wins over ezkeel.yaml env)
+  ezkeel up --env NODE_ENV=production --env LOG_LEVEL=debug
+
+  # Machine-readable NDJSON progress for coding agents (implies --plain)
+  ezkeel up --json`,
 	RunE: runUp,
 }
 
@@ -84,10 +90,12 @@ func init() {
 	upCmd.Flags().String("server", "", "Target server name")
 	upCmd.Flags().String("name", "", "App name override")
 	upCmd.Flags().Bool("plain", false, "Disable TUI output")
+	upCmd.Flags().Bool("json", false, "Emit NDJSON progress events on stdout (implies --plain)")
 	upCmd.Flags().Bool("dry-run", false, "Show detection results without deploying")
 	upCmd.Flags().String("memory", "", "Container memory limit (e.g. 512m, 1g)")
 	upCmd.Flags().String("cpus", "", "Container CPU limit (e.g. 1.0, 0.5)")
 	upCmd.Flags().String("template", "", "Deploy a curated template by slug (e.g. todo-list)")
+	upCmd.Flags().StringArray("env", nil, "Set an env var for this deploy (KEY=VALUE, repeatable; wins over ezkeel.yaml env and stored app env)")
 }
 
 // resolveTemplateArg expands a --template slug into a repo URL by
@@ -252,6 +260,61 @@ func resolveResources(memFlag, cpuFlag string, s *spec.Spec) (mem, cpu string) {
 	return
 }
 
+// mergeDeployEnv builds the env map handed to the agent's
+// DeployRequest. Precedence (lowest → highest): env stored in the app
+// manifest from previous deploys / `ezkeel env set` < ezkeel.yaml
+// `env:` entries < --env flags. Flag entries are validated here with
+// the same KEY=VALUE rule spec.Load applies to ezkeel.yaml entries.
+func mergeDeployEnv(manifestEnv map[string]string, s *spec.Spec, flagEnv []string) (map[string]string, error) {
+	env := make(map[string]string)
+	for k, v := range manifestEnv {
+		env[k] = v
+	}
+	for k, v := range s.EnvMap() {
+		env[k] = v
+	}
+	for _, entry := range flagEnv {
+		k, v, err := spec.ParseEnvEntry(entry)
+		if err != nil {
+			return nil, fmt.Errorf("--env: %w", err)
+		}
+		env[k] = v
+	}
+	return env, nil
+}
+
+// migratorHint returns a one-line command for running the detected
+// migrator manually. The detector's own MigrateCmd wins when set
+// (currently only Prisma populates it); the table below covers the
+// rest so every detectable migrator gets an actionable hint.
+func migratorHint(r *detect.DatabaseResult) string {
+	if r == nil {
+		return ""
+	}
+	if r.MigrateCmd != "" {
+		return r.MigrateCmd
+	}
+	switch r.Migrator {
+	case detect.MigratorPrisma:
+		return "npx prisma migrate deploy"
+	case detect.MigratorDrizzle:
+		return "npx drizzle-kit migrate"
+	case detect.MigratorAlembic:
+		return "alembic upgrade head"
+	case detect.MigratorDjango:
+		return "python manage.py migrate"
+	}
+	return ""
+}
+
+// migrationWarning formats the loud "you still have to run migrations"
+// banner shown when a migrator is detected. EZKeel deliberately does
+// not run migrations (no rollback story, no lock handling), so make
+// sure the user can't miss it.
+func migrationWarning(migrator detect.Migrator, hint string) string {
+	return fmt.Sprintf("WARNING: %s migrations detected — EZKeel does not run migrations automatically. Run them via: %s", migrator, hint)
+}
+
 // applyServicesFromSpec layers ezkeel.yaml services onto the
 // auto-detected database result. Spec overrides detect when a service
 // engine is explicitly declared so a repo without an importable client
@@ -305,7 +368,22 @@ func normalizeDBEngine(raw string) (detect.DBEngine, error) {
 	return "", fmt.Errorf("unsupported services.db.engine %q (supported: postgres)", raw)
 }
 
+// runUp wraps runUpWith so --json mode is guaranteed a final
+// {"event":"result","ok":false,"error":...} line on every error path,
+// no matter how early the failure happens.
 func runUp(cmd *cobra.Command, args []string) error {
+	var em *upJSONEmitter
+	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+		em = newUpJSONEmitter(os.Stdout)
+	}
+	err := runUpWith(cmd, args, em)
+	if err != nil {
+		em.fail(err.Error())
+	}
+	return err
+}
+
+func runUpWith(cmd *cobra.Command, args []string, em *upJSONEmitter) error {
 	ctx := cmd.Context()
 	start := time.Now()
 
@@ -313,6 +391,22 @@ func runUp(cmd *cobra.Command, args []string) error {
 	nameFlag, _ := cmd.Flags().GetString("name")
 	plain, _ := cmd.Flags().GetBool("plain")
 	templateSlug, _ := cmd.Flags().GetString("template")
+	flagEnv, _ := cmd.Flags().GetStringArray("env")
+	jsonOut := em != nil
+	// --json owns stdout for NDJSON: force the line-per-step machinery
+	// (no TUI screen clearing); the jsonOut guard in printStep below
+	// keeps human prose off stdout.
+	if jsonOut {
+		plain = true
+	}
+
+	// Validate --env up front — a typo'd KEY should fail before we
+	// clone, build, or touch the server.
+	for _, entry := range flagEnv {
+		if _, _, err := spec.ParseEnvEntry(entry); err != nil {
+			return fmt.Errorf("--env: %w", err)
+		}
+	}
 
 	// Resolve --template slug to a repo URL before the rest of the
 	// pipeline looks at args. The flag wins if both are provided.
@@ -409,7 +503,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	model := tui.NewDeployModel(appName, stepLabels)
 
 	printStep := func(icon, msg string) {
-		if plain {
+		if plain && !jsonOut {
 			fmt.Printf("  %s %s\n", icon, msg)
 		}
 	}
@@ -423,11 +517,13 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	// Step 0: Detect framework
 	model.StartStep(0)
+	em.step("detect", "start", "")
 	printProgress()
 
 	fr, err := detect.DetectFramework(sourceDir)
 	if err != nil {
 		model.FailStep(0, err.Error())
+		em.step("detect", "fail", err.Error())
 		printProgress()
 		printStep(tui.IconFail, "detect framework: "+err.Error())
 		return fmt.Errorf("detecting framework in %s: %w\n\nhint: pass a repo URL with `ezkeel up <repo-url>` or run from the project root", sourceDir, err)
@@ -442,25 +538,51 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	if fr.Framework == detect.FrameworkUnknown {
 		model.FailStep(0, "unknown framework")
+		em.step("detect", "fail", "unknown framework")
 		printProgress()
 		printStep(tui.IconFail, "detect framework: unknown framework")
 		return fmt.Errorf("could not detect a supported framework in %s\n\nhint: drop a Dockerfile next to your code and run `ezkeel up` again, or declare framework: in an ezkeel.yaml at the repo root.\nsupported frameworks: run `ezkeel up --help` or visit https://ezkeel.com/docs.html", sourceDir)
 	}
 
 	dbResult := detect.DetectDatabase(sourceDir)
+	// Capture migrator info before applyServicesFromSpec — a spec
+	// services override replaces the DatabaseResult and would drop it.
+	var detectedMigrator detect.Migrator
+	var migHint, migWarning string
+	if dbResult != nil && dbResult.Migrator != detect.MigratorNone {
+		detectedMigrator = dbResult.Migrator
+		migHint = migratorHint(dbResult)
+		migWarning = migrationWarning(detectedMigrator, migHint)
+	}
 	dbResult, err = applyServicesFromSpec(dbResult, loadedSpec)
 	if err != nil {
 		model.FailStep(0, err.Error())
+		em.step("detect", "fail", "ezkeel.yaml services: "+err.Error())
 		printProgress()
 		printStep(tui.IconFail, "ezkeel.yaml services: "+err.Error())
 		return fmt.Errorf("ezkeel.yaml: %w", err)
 	}
 
 	model.CompleteStep(0, fmt.Sprintf("detected %s", fr.Framework))
+	em.step("detect", "done", fmt.Sprintf("detected %s", fr.Framework))
 	printProgress()
 	printStep(tui.IconDone, fmt.Sprintf("detected %s", fr.Framework))
 	if overridden {
 		printStep(tui.IconDone, "applied ezkeel.yaml overrides")
+	}
+
+	// Loud heads-up when a migrator is present: EZKeel deploys the new
+	// image but never runs migrations. stderr in json mode (stdout is
+	// NDJSON-only), stdout in plain mode; the TUI path re-prints it
+	// after the final summary since the screen-clearing redraws would
+	// wipe it here.
+	if migWarning != "" {
+		if jsonOut {
+			fmt.Fprintln(os.Stderr, migWarning)
+			em.warning("migrations_not_run", string(detectedMigrator), migHint)
+		} else if plain {
+			fmt.Println(migWarning)
+		}
 	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -484,12 +606,22 @@ func runUp(cmd *cobra.Command, args []string) error {
 			Domain:     fmt.Sprintf("%s.%s", appName, srv.Domain),
 			Server:     srv.Name,
 		}
+		if jsonOut {
+			// NDJSON mode: close the stream with a (predicted) result
+			// line instead of human-formatted detection output.
+			em.result(appName, "https://"+info.Domain, info.Framework, info.DBEngine != "")
+			return nil
+		}
 		fmt.Println(formatDryRun(info))
+		if migWarning != "" && !plain {
+			fmt.Println(migWarning)
+		}
 		return nil
 	}
 
 	// Step 1: Generate Dockerfile if needed
 	model.StartStep(1)
+	em.step("dockerfile", "start", "")
 	printProgress()
 
 	dockerfilePath := filepath.Join(sourceDir, "Dockerfile")
@@ -497,6 +629,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		content := detect.GenerateDockerfile(fr)
 		if content == "" {
 			model.FailStep(1, "could not generate dockerfile")
+			em.step("dockerfile", "fail", "could not generate dockerfile")
 			printProgress()
 			printStep(tui.IconFail, "generate dockerfile failed")
 			return fmt.Errorf("no Dockerfile template for framework %s\n\nhint: add a Dockerfile to your repo and ezkeel will use it as-is. file an issue at https://github.com/ferax564/ezkeel-cli/issues if you'd like first-class support", fr.Framework)
@@ -504,20 +637,24 @@ func runUp(cmd *cobra.Command, args []string) error {
 		dockerfilePath = filepath.Join(sourceDir, "Dockerfile.ezkeel")
 		if err := os.WriteFile(dockerfilePath, []byte(content), 0o644); err != nil {
 			model.FailStep(1, err.Error())
+			em.step("dockerfile", "fail", "write dockerfile: "+err.Error())
 			printProgress()
 			printStep(tui.IconFail, "write dockerfile: "+err.Error())
 			return fmt.Errorf("writing Dockerfile.ezkeel to %s: %w\n\nhint: check that the target directory is writable", dockerfilePath, err)
 		}
 		model.CompleteStep(1, "generated Dockerfile.ezkeel")
+		em.step("dockerfile", "done", "generated Dockerfile.ezkeel")
 		printStep(tui.IconDone, "generated Dockerfile.ezkeel")
 	} else {
 		model.CompleteStep(1, "using existing Dockerfile")
+		em.step("dockerfile", "done", "using existing Dockerfile")
 		printStep(tui.IconDone, "using existing Dockerfile")
 	}
 	printProgress()
 
 	// Step 2: Build Docker image
 	model.StartStep(2)
+	em.step("build", "start", "")
 	printProgress()
 
 	imageTag := appName + ":latest"
@@ -525,13 +662,17 @@ func runUp(cmd *cobra.Command, args []string) error {
 	buildCmd := exec.Command("docker", buildArgs...)
 	buildCmd.Stdout = os.Stdout
 	buildCmd.Stderr = os.Stderr
-	if !plain {
+	if jsonOut {
+		// NDJSON owns stdout — route docker's build chatter to stderr.
+		buildCmd.Stdout = os.Stderr
+	} else if !plain {
 		buildCmd.Stdout = nil
 		buildCmd.Stderr = nil
 	}
 
 	if err := buildCmd.Run(); err != nil {
 		model.FailStep(2, "docker build failed: "+err.Error())
+		em.step("build", "fail", "docker build failed: "+err.Error())
 		printProgress()
 		printStep(tui.IconFail, "docker build failed: "+err.Error())
 		if !plain {
@@ -541,6 +682,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 
 	model.CompleteStep(2, "built "+imageTag)
+	em.step("build", "done", "built "+imageTag)
 	printProgress()
 	printStep(tui.IconDone, "built "+imageTag)
 
@@ -552,36 +694,45 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	// Push image to server
 	printStep(tui.IconActive, "pushing image to "+srv.Name+"...")
+	em.step("push", "start", "")
 	var lastReported int64
 	if err := client.UploadImage(imageTag, func(n int64) {
 		if n-lastReported < 1<<20 {
 			return
 		}
 		lastReported = n
-		if plain {
+		if plain && !jsonOut {
 			fmt.Fprintf(os.Stderr, "\r  uploading... %.1f MB", float64(n)/(1024*1024))
 		}
 	}); err != nil {
 		model.FailStep(2, "image push failed: "+err.Error())
+		em.step("push", "fail", "image push failed: "+err.Error())
 		printProgress()
 		printStep(tui.IconFail, "image push failed: "+err.Error())
 		return fmt.Errorf("pushing image: %w", err)
 	}
-	if plain {
+	if plain && !jsonOut {
 		fmt.Fprintln(os.Stderr)
+	}
+	em.step("push", "done", "pushed "+imageTag+" to "+srv.Name)
+
+	// Merge the deploy env before provisioning so the DATABASE_URL
+	// injection below still wins over everything (it reflects the
+	// freshly provisioned credentials).
+	var manifestEnv map[string]string
+	existingManifest, _ := detect.LoadManifest(detect.ManifestPath(appName))
+	if existingManifest != nil {
+		manifestEnv = existingManifest.Env
+	}
+	env, err := mergeDeployEnv(manifestEnv, loadedSpec, flagEnv)
+	if err != nil {
+		return err
 	}
 
 	// Step 3: Provision services (database)
 	model.StartStep(3)
+	em.step("provision_db", "start", "")
 	printProgress()
-
-	env := make(map[string]string)
-	existingManifest, _ := detect.LoadManifest(detect.ManifestPath(appName))
-	if existingManifest != nil {
-		for k, v := range existingManifest.Env {
-			env[k] = v
-		}
-	}
 
 	if dbResult != nil && dbResult.Engine == detect.DBPostgres {
 		printStep(tui.IconActive, "provisioning PostgreSQL...")
@@ -606,19 +757,23 @@ func runUp(cmd *cobra.Command, args []string) error {
 		if dbErr == nil && dbResp.OK {
 			env["DATABASE_URL"] = fmt.Sprintf("postgresql://%s:%s@ezkeel-postgres:5432/%s", dbName, dbPass, dbName)
 			model.CompleteStep(3, "provisioned PostgreSQL: "+dbName)
+			em.step("provision_db", "done", "provisioned PostgreSQL: "+dbName)
 			printStep(tui.IconDone, "provisioned PostgreSQL: "+dbName)
 		} else {
 			model.CompleteStep(3, "database may already exist")
+			em.step("provision_db", "done", "database may already exist")
 			printStep(tui.IconDone, "database may already exist")
 		}
 	} else {
 		model.CompleteStep(3, "no services needed")
+		em.step("provision_db", "done", "no services needed")
 		printStep(tui.IconDone, "no services needed")
 	}
 	printProgress()
 
 	// Step 4: Deploy via agent
 	model.StartStep(4)
+	em.step("deploy", "start", "")
 	printProgress()
 
 	resp, err := client.Send(ctx, &agent.Request{
@@ -635,20 +790,25 @@ func runUp(cmd *cobra.Command, args []string) error {
 	})
 	if err != nil {
 		model.FailStep(4, "deploy failed: "+err.Error())
+		em.step("deploy", "fail", "deploy failed: "+err.Error())
 		printProgress()
 		printStep(tui.IconFail, "deploy failed: "+err.Error())
 		return fmt.Errorf("deploying via agent: %w", err)
 	}
 	if !resp.OK {
 		model.FailStep(4, "agent: "+resp.Error)
+		em.step("deploy", "fail", "agent: "+resp.Error)
 		printProgress()
 		printStep(tui.IconFail, "agent: "+resp.Error)
 		return fmt.Errorf("agent deploy error: %s", resp.Error)
 	}
+	em.step("deploy", "done", fmt.Sprintf("deployed to %s", srv.Name))
 
 	appDomain := fmt.Sprintf("%s.%s", appName, srv.Domain)
 	cName := safeContainerName(appName)
+	em.step("caddy_route", "start", "")
 	addCaddyRoute(client, appDomain, cName, deployPort)
+	em.step("caddy_route", "done", appDomain)
 
 	model.CompleteStep(4, fmt.Sprintf("deployed to %s", srv.Name))
 	printStep(tui.IconDone, fmt.Sprintf("deployed to %s", srv.Name))
@@ -656,6 +816,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	// Step 5: Health check
 	model.StartStep(5)
+	em.step("health", "start", "")
 	printProgress()
 
 	appURL := fmt.Sprintf("https://%s", appDomain)
@@ -672,9 +833,11 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	if healthOK {
 		model.CompleteStep(5, "health check passed")
+		em.step("health", "done", "health check passed")
 		printStep(tui.IconDone, "health check passed")
 	} else {
 		model.CompleteStep(5, "health check skipped (container may still be starting)")
+		em.step("health", "done", "health check skipped (container may still be starting)")
 		printStep(tui.IconDone, "health check skipped (container may still be starting)")
 	}
 	printProgress()
@@ -718,7 +881,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 	// Final output
 	elapsed := int(time.Since(start).Seconds())
 
-	if plain {
+	if jsonOut {
+		em.result(appName, appURL, string(fr.Framework), env["DATABASE_URL"] != "")
+	} else if plain {
 		fmt.Println(appURL)
 	} else {
 		result := &tui.DeployResult{
@@ -729,6 +894,12 @@ func runUp(cmd *cobra.Command, args []string) error {
 			TimeSec: elapsed,
 		}
 		fmt.Println(tui.RenderSuccess(result))
+		// The TUI's screen-clearing redraws would have wiped the
+		// migration warning printed at detect time — repeat it here
+		// where it stays visible.
+		if migWarning != "" {
+			fmt.Println(migWarning)
+		}
 	}
 
 	return nil

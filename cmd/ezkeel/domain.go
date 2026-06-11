@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/ferax564/ezkeel-cli/internal/detect"
@@ -114,16 +115,38 @@ var domainRemoveCmd = &cobra.Command{
 	},
 }
 
+// domainListJSON is the machine-readable shape emitted by
+// `ezkeel domain list --json`.
+type domainListJSON struct {
+	App     string   `json:"app"`
+	Domains []string `json:"domains"`
+}
+
+// appDomains returns the app's auto-assigned domain followed by its
+// custom domains, never nil.
+func appDomains(m *detect.AppManifest) []string {
+	domains := make([]string, 0, len(m.Domains)+1)
+	if m.Domain != "" {
+		domains = append(domains, m.Domain)
+	}
+	return append(domains, m.Domains...)
+}
+
 var domainListCmd = &cobra.Command{
 	Use:   "list <app>",
 	Short: "List custom domains for an app",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		appName := args[0]
+		jsonOut, _ := cmd.Flags().GetBool("json")
 		manifestPath := detect.ManifestPath(appName)
 		m, err := detect.LoadManifest(manifestPath)
 		if err != nil {
 			return fmt.Errorf("app %q not found", appName)
+		}
+
+		if jsonOut {
+			return emitJSON(os.Stdout, domainListJSON{App: appName, Domains: appDomains(m)})
 		}
 
 		fmt.Printf("Domains for %s:\n\n", appName)
@@ -136,6 +159,7 @@ var domainListCmd = &cobra.Command{
 }
 
 func init() {
+	domainListCmd.Flags().Bool("json", false, "Output machine-readable JSON")
 	domainCmd.AddCommand(domainAddCmd)
 	domainCmd.AddCommand(domainRemoveCmd)
 	domainCmd.AddCommand(domainListCmd)

@@ -21,7 +21,7 @@ services:
 runtime: docker
 sandbox: false
 env:
-  - NODE_ENV
+  - NODE_ENV=production
 `
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -49,8 +49,90 @@ env:
 	if got.Sandbox {
 		t.Errorf("Sandbox = true, want false")
 	}
-	if len(got.Env) != 1 || got.Env[0] != "NODE_ENV" {
+	if len(got.Env) != 1 || got.Env[0] != "NODE_ENV=production" {
 		t.Errorf("Env = %v", got.Env)
+	}
+	if m := got.EnvMap(); m["NODE_ENV"] != "production" {
+		t.Errorf("EnvMap = %v, want NODE_ENV=production", m)
+	}
+}
+
+// TestLoadRejectsMalformedEnv pins the env validation contract: spec
+// entries must be KEY=VALUE with a POSIX-style key. A bare variable
+// name (the old, ignored format) now fails loud at Load time instead of
+// being silently dropped from the container env.
+func TestLoadRejectsMalformedEnv(t *testing.T) {
+	cases := []string{
+		"NODE_ENV",   // bare name, no '='
+		"1FOO=x",     // key starts with digit
+		"FO-O=x",     // dash in key
+		"=value",     // empty key
+		"NODE ENV=x", // space in key
+	}
+	for _, entry := range cases {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "ezkeel.yaml")
+		body := "# spec: ezkeel/v1\nname: x\nenv:\n  - \"" + entry + "\"\n"
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("seed %q: %v", entry, err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Errorf("Load with env entry %q expected error, got nil", entry)
+		}
+	}
+}
+
+func TestLoadAcceptsValidEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ezkeel.yaml")
+	body := `# spec: ezkeel/v1
+name: x
+env:
+  - NODE_ENV=production
+  - EMPTY_OK=
+  - _UNDER=1
+  - URL=postgres://u:p@h/db?a=b
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	m := got.EnvMap()
+	if m["EMPTY_OK"] != "" {
+		t.Errorf("EMPTY_OK = %q, want empty value accepted", m["EMPTY_OK"])
+	}
+	// Only the first '=' splits — values may contain '='.
+	if m["URL"] != "postgres://u:p@h/db?a=b" {
+		t.Errorf("URL = %q, want full value with embedded '='", m["URL"])
+	}
+}
+
+func TestParseEnvEntry(t *testing.T) {
+	k, v, err := ParseEnvEntry("KEY=a=b")
+	if err != nil {
+		t.Fatalf("ParseEnvEntry: %v", err)
+	}
+	if k != "KEY" || v != "a=b" {
+		t.Errorf("got %q=%q, want KEY=a=b", k, v)
+	}
+	if _, _, err := ParseEnvEntry("no-equals"); err == nil {
+		t.Errorf("expected error for entry without '='")
+	}
+	if _, _, err := ParseEnvEntry("9BAD=x"); err == nil {
+		t.Errorf("expected error for key starting with digit")
+	}
+}
+
+func TestEnvMapNilSpec(t *testing.T) {
+	var s *Spec
+	if m := s.EnvMap(); m != nil {
+		t.Errorf("nil spec EnvMap = %v, want nil", m)
+	}
+	if m := (&Spec{Name: "x"}).EnvMap(); m != nil {
+		t.Errorf("empty env EnvMap = %v, want nil", m)
 	}
 }
 

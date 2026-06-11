@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/ferax564/ezkeel-cli/pkg/agent"
 	"github.com/ferax564/ezkeel-cli/internal/config"
+	"github.com/ferax564/ezkeel-cli/pkg/agent"
 	"github.com/ferax564/ezkeel-cli/pkg/bootstrap"
 	hetznerPkg "github.com/ferax564/ezkeel-cli/pkg/hetzner"
 	"github.com/spf13/cobra"
@@ -179,13 +179,47 @@ var serverAddCmd = &cobra.Command{
 	},
 }
 
+// serverJSON is the machine-readable shape emitted by `ezkeel server list --json`.
+type serverJSON struct {
+	Name    string `json:"name"`
+	Host    string `json:"host"`
+	User    string `json:"user"`
+	Domain  string `json:"domain"`
+	Default bool   `json:"default"`
+}
+
+// serversToJSON maps server configs to the --json output shape. The
+// first entry is flagged default to mirror config.DefaultServer, which
+// picks servers[0] when --server is omitted.
+func serversToJSON(servers []*config.Server) []serverJSON {
+	out := make([]serverJSON, 0, len(servers))
+	for i, srv := range servers {
+		user := srv.User
+		if user == "" {
+			user = "root"
+		}
+		out = append(out, serverJSON{
+			Name:    srv.Name,
+			Host:    srv.Host,
+			User:    user,
+			Domain:  srv.Domain,
+			Default: i == 0,
+		})
+	}
+	return out
+}
+
 var serverListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List configured servers",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		jsonOut, _ := cmd.Flags().GetBool("json")
 		servers, err := config.ListServers()
 		if err != nil {
 			return fmt.Errorf("listing servers: %w", err)
+		}
+		if jsonOut {
+			return emitJSON(os.Stdout, serversToJSON(servers))
 		}
 		if len(servers) == 0 {
 			fmt.Println("No servers configured. Use 'ezkeel server add' to add one.")
@@ -433,6 +467,7 @@ func init() {
 	serverAddCmd.Flags().String("hetzner-location", "fsn1", "Hetzner datacenter (fsn1, nbg1, hel1)")
 	serverAddCmd.Flags().String("hetzner-ssh-key", "", "Name of SSH key in Hetzner Cloud console")
 	serverAddCmd.Flags().String("agent-version", "", "Pin the ezkeel-agent release to install (e.g. v0.8.0; default latest, or EZKEEL_AGENT_VERSION env)")
+	serverListCmd.Flags().Bool("json", false, "Output machine-readable JSON")
 	serverUpdateAgentCmd.Flags().String("agent-version", "", "Release tag to install (e.g. v0.8.0; default latest)")
 	serverUpdateAgentCmd.Flags().String("url", "", "Download the agent binary from this URL instead of GitHub releases")
 	serverUpdateAgentCmd.Flags().String("sha256", "", "Expected SHA256 of the new binary (default: looked up in the release's SHA256SUMS)")

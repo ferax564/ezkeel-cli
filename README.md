@@ -48,21 +48,22 @@ ezkeel up github.com/user/my-app
 - **Auto-provision** — `ezkeel server add --hetzner` creates a VPS and configures everything.
 - **Zero-downtime + rollback** — Health-checked deploys. `ezkeel rollback` reverts instantly.
 - **Built-in diagnostics** — `ezkeel doctor` checks SSH, Docker, agent, DNS, disk space.
+- **Agent-friendly** — `--json` on read commands and NDJSON progress events from `ezkeel up --json` make the CLI fully drivable by coding agents.
 
 ## Commands
 
 ```bash
 # Deploy
-ezkeel up [repo-url]           # Deploy any app (--dry-run to preview)
-ezkeel server add --host <ip>  # Add a VPS (--hetzner to auto-provision)
-ezkeel apps                    # List deployed apps
-ezkeel logs <app>              # Stream app logs
+ezkeel up [repo-url]           # Deploy any app (--dry-run, --env K=V, --json for NDJSON progress)
+ezkeel server add --host <ip>  # Add a VPS (--hetzner to auto-provision; list with --json)
+ezkeel apps                    # List deployed apps (--json)
+ezkeel logs <app>              # Stream app logs (--json)
 ezkeel down <app>              # Remove an app
 ezkeel rollback <app>          # Roll back to previous deployment
 ezkeel env set <app> K=V       # Set env vars
 ezkeel backup <app>            # Backup app database
-ezkeel doctor                  # Check system health
-ezkeel domain add <app> <dom>  # Add custom domain
+ezkeel doctor                  # Check system health (--json)
+ezkeel domain add <app> <dom>  # Add custom domain (list with --json)
 ezkeel ci setup                # Generate CI workflow (--github for GitHub Actions)
 
 # Agents
