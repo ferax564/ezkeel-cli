@@ -27,6 +27,10 @@ var rollbackCmd = &cobra.Command{
 				Port:    appPort(m.App.Port),
 				Memory:  m.Resources.Memory,
 				CPUs:    m.Resources.CPUs,
+				// The :prev container is a fresh docker run — it needs
+				// the same env (DATABASE_URL etc.) the deploy carried,
+				// or DB-backed apps crash-loop after rollback.
+				Env: m.Env,
 			},
 		})
 		if err != nil {
