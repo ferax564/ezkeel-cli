@@ -5,22 +5,57 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ferax564/ezkeel-cli/pkg/agent"
 	"github.com/ferax564/ezkeel-cli/internal/config"
 	"github.com/ferax564/ezkeel-cli/internal/detect"
 	"github.com/ferax564/ezkeel-cli/internal/tui"
+	"github.com/ferax564/ezkeel-cli/pkg/agent"
 	"github.com/spf13/cobra"
 )
+
+// appJSON is the machine-readable shape emitted by `ezkeel apps --json`.
+type appJSON struct {
+	Name      string   `json:"name"`
+	Server    string   `json:"server"`
+	Framework string   `json:"framework"`
+	Port      int      `json:"port"`
+	URL       string   `json:"url"`
+	Domains   []string `json:"domains"`
+}
+
+// appsToJSON maps stored manifests to the --json output shape. Domains
+// is never null — agents iterate it without a nil check.
+func appsToJSON(manifests []*detect.AppManifest) []appJSON {
+	out := make([]appJSON, 0, len(manifests))
+	for _, m := range manifests {
+		domains := m.Domains
+		if domains == nil {
+			domains = []string{}
+		}
+		out = append(out, appJSON{
+			Name:      m.Name,
+			Server:    m.Server,
+			Framework: m.App.Framework,
+			Port:      m.App.Port,
+			URL:       "https://" + m.Domain,
+			Domains:   domains,
+		})
+	}
+	return out
+}
 
 var appsCmd = &cobra.Command{
 	Use:   "apps",
 	Short: "List deployed apps",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		jsonOut, _ := cmd.Flags().GetBool("json")
 		appsDir := filepath.Join(config.EzkeelHome(), "apps")
 
 		entries, err := os.ReadDir(appsDir)
 		if err != nil {
 			if os.IsNotExist(err) {
+				if jsonOut {
+					return emitJSON(os.Stdout, []appJSON{})
+				}
 				fmt.Printf("%s\n\nNo apps deployed yet. Run 'ezkeel up' to deploy your first app.\n", tui.Banner())
 				return nil
 			}
@@ -42,6 +77,10 @@ var appsCmd = &cobra.Command{
 			manifests = append(manifests, m)
 		}
 
+		if jsonOut {
+			return emitJSON(os.Stdout, appsToJSON(manifests))
+		}
+
 		fmt.Printf("%s\n\n", tui.Banner())
 
 		if len(manifests) == 0 {
@@ -59,12 +98,19 @@ var appsCmd = &cobra.Command{
 	},
 }
 
+// logsJSON is the machine-readable shape emitted by `ezkeel logs --json`.
+type logsJSON struct {
+	App   string   `json:"app"`
+	Lines []string `json:"lines"`
+}
+
 var logsCmd = &cobra.Command{
 	Use:   "logs <app>",
 	Short: "Stream logs from a deployed app",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		appName := args[0]
+		jsonOut, _ := cmd.Flags().GetBool("json")
 		_, client, err := resolveApp(appName)
 		if err != nil {
 			return err
@@ -80,6 +126,14 @@ var logsCmd = &cobra.Command{
 		}
 		if !resp.OK {
 			return fmt.Errorf("agent error: %s", resp.Error)
+		}
+
+		if jsonOut {
+			logLines := resp.Logs
+			if logLines == nil {
+				logLines = []string{}
+			}
+			return emitJSON(os.Stdout, logsJSON{App: appName, Lines: logLines})
 		}
 
 		for _, line := range resp.Logs {
@@ -103,7 +157,9 @@ func resolveApp(appName string) (*detect.AppManifest, *agent.Client, error) {
 }
 
 func init() {
+	appsCmd.Flags().Bool("json", false, "Output machine-readable JSON")
 	logsCmd.Flags().Int("lines", 100, "Number of log lines to show")
+	logsCmd.Flags().Bool("json", false, "Output machine-readable JSON")
 }
 
 var downCmd = &cobra.Command{

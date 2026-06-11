@@ -108,11 +108,19 @@ type DBBackupRequest struct {
 }
 
 // RollbackRequest carries parameters for a rollback command.
+//
+// Env MUST carry the same environment the app was deployed with
+// (DATABASE_URL + user env). The rolled-back container is a fresh
+// `docker run` of the :prev image — without Env it starts bare and a
+// DB-backed app crash-loops, which is exactly the failure rollback is
+// supposed to prevent. Optional in the JSON for wire compatibility
+// with old callers; new callers must populate it.
 type RollbackRequest struct {
-	AppName string `json:"app_name"`
-	Port    int    `json:"port"`
-	Memory  string `json:"memory,omitempty"`
-	CPUs    string `json:"cpus,omitempty"`
+	AppName string            `json:"app_name"`
+	Port    int               `json:"port"`
+	Memory  string            `json:"memory,omitempty"`
+	CPUs    string            `json:"cpus,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
 }
 
 // UpdateRequest carries parameters for an agent self-update command.

@@ -556,7 +556,10 @@ func handleRollback(r runner, req *agent.RollbackRequest) *agent.Response {
 
 	stopAndRemove(r, name)
 
-	args := buildRunArgs(name, req.Port, req.Memory, req.CPUs, nil, prevTag)
+	// req.Env carries the deploy-time environment (DATABASE_URL + user
+	// env). Without it the fresh :prev container starts bare and a
+	// DB-backed app crash-loops — the pre-fix behaviour.
+	args := buildRunArgs(name, req.Port, req.Memory, req.CPUs, req.Env, prevTag)
 	out, err := r.CombinedOutput("docker", args...)
 	if err != nil {
 		return respErr(fmt.Sprintf("rollback failed: %s: %s", err.Error(), string(out)))

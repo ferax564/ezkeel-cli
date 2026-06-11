@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -31,11 +32,48 @@ func parseDiskUsagePct(line string) (int, error) {
 	return 0, fmt.Errorf("no percentage found in %q", line)
 }
 
+// doctorJSON is the machine-readable shape emitted by `ezkeel doctor --json`.
+// OK is the conjunction of all individual checks.
+type doctorJSON struct {
+	Checks []doctorCheckJSON `json:"checks"`
+	OK     bool              `json:"ok"`
+}
+
+type doctorCheckJSON struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+}
+
+// doctorReport maps check results to the --json output shape.
+func doctorReport(results []checkResult) doctorJSON {
+	report := doctorJSON{Checks: make([]doctorCheckJSON, 0, len(results)), OK: true}
+	for _, r := range results {
+		report.Checks = append(report.Checks, doctorCheckJSON{Name: r.Name, OK: r.OK, Detail: r.Detail})
+		if !r.OK {
+			report.OK = false
+		}
+	}
+	return report
+}
+
+// outputResults renders the collected checks: NDJSON-free single JSON
+// document in --json mode, icon-per-line text otherwise. Exit code is
+// unchanged either way (doctor reports, it does not gate).
+func outputResults(results []checkResult, jsonOut bool) error {
+	if jsonOut {
+		return emitJSON(os.Stdout, doctorReport(results))
+	}
+	printResults(results)
+	return nil
+}
+
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Check system health and server connectivity",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		serverName, _ := cmd.Flags().GetString("server")
+		jsonOut, _ := cmd.Flags().GetBool("json")
 
 		var srv *config.Server
 		var err error
@@ -45,7 +83,9 @@ var doctorCmd = &cobra.Command{
 			srv, err = config.DefaultServer()
 		}
 
-		fmt.Printf("%s doctor v%s\n\n", tui.Banner(), version.Version)
+		if !jsonOut {
+			fmt.Printf("%s doctor v%s\n\n", tui.Banner(), version.Version)
+		}
 
 		// Check 1: Local Docker
 		var results []checkResult
@@ -59,8 +99,7 @@ var doctorCmd = &cobra.Command{
 		// If no server configured, show local-only results
 		if err != nil {
 			results = append(results, checkResult{"Server", false, "no server configured — run 'ezkeel server add'"})
-			printResults(results)
-			return nil
+			return outputResults(results, jsonOut)
 		}
 
 		client := clientFromServer(srv)
@@ -70,8 +109,7 @@ var doctorCmd = &cobra.Command{
 		sshOut, sshErr := client.RunRemote(ctx, "echo ok")
 		if sshErr != nil {
 			results = append(results, checkResult{"SSH to " + srv.Name, false, "connection failed: " + sshErr.Error()})
-			printResults(results)
-			return nil
+			return outputResults(results, jsonOut)
 		}
 		if strings.TrimSpace(sshOut) == "ok" {
 			results = append(results, checkResult{"SSH to " + srv.Name, true, srv.Host})
@@ -130,8 +168,7 @@ var doctorCmd = &cobra.Command{
 		// Check 7: Container security — exposed DB ports + trust auth
 		results = append(results, runContainerSecurityChecks(ctx, client)...)
 
-		printResults(results)
-		return nil
+		return outputResults(results, jsonOut)
 	},
 }
 
@@ -216,4 +253,5 @@ func printResults(results []checkResult) {
 
 func init() {
 	doctorCmd.Flags().String("server", "", "Server to check (default: first configured)")
+	doctorCmd.Flags().Bool("json", false, "Output machine-readable JSON")
 }

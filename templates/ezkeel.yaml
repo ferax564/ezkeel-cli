@@ -23,9 +23,11 @@ name: {{PROJECT_NAME}}
 runtime: docker
 sandbox: false
 
-env:
-  - DATABASE_URL
-  - NODE_ENV
+# Environment variables baked into every deploy, as KEY=VALUE pairs.
+# DATABASE_URL is injected automatically when a database is provisioned.
+# One-off overrides: `ezkeel up --env KEY=VALUE` (flag wins over spec).
+# env:
+#   - NODE_ENV=production
 
 resources:
   memory: "512m"

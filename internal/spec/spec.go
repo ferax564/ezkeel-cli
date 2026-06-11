@@ -36,6 +36,28 @@ func validAppName(name string) bool {
 	return validNameRe.MatchString(name)
 }
 
+// validEnvKeyRe matches POSIX-style environment variable names. Shared
+// by ezkeel.yaml `env:` entries and the `ezkeel up --env` flag via
+// ParseEnvEntry so both surfaces enforce the same rule.
+var validEnvKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// ParseEnvEntry splits a "KEY=VALUE" string into its parts, validating
+// the key against the POSIX env-name pattern. The value may be empty
+// and may itself contain '=' (only the first one splits). Returns a
+// clear error for entries with no '=' or a malformed key so callers
+// can reject at parse time instead of shipping a broken container env.
+func ParseEnvEntry(entry string) (key, value string, err error) {
+	idx := strings.IndexByte(entry, '=')
+	if idx < 0 {
+		return "", "", fmt.Errorf("invalid env entry %q: expected KEY=VALUE (e.g. NODE_ENV=production)", entry)
+	}
+	key, value = entry[:idx], entry[idx+1:]
+	if !validEnvKeyRe.MatchString(key) {
+		return "", "", fmt.Errorf("invalid env key %q: must start with a letter or underscore and contain only letters, digits, underscores", key)
+	}
+	return key, value, nil
+}
+
 // Spec is the v1 deploy spec parsed from ezkeel.yaml.
 type Spec struct {
 	Name      string             `yaml:"name"`
@@ -83,10 +105,34 @@ func Load(path string) (*Spec, error) {
 	if !validAppName(s.Name) {
 		return nil, fmt.Errorf("%s: invalid name %q (must be lowercase letters, digits, dashes; 1-63 chars; matches RFC1123 hostname)", path, s.Name)
 	}
+	for i, e := range s.Env {
+		if _, _, err := ParseEnvEntry(e); err != nil {
+			return nil, fmt.Errorf("%s: env[%d]: %w", path, i, err)
+		}
+	}
 	if s.Runtime == "" {
 		s.Runtime = "docker"
 	}
 	return &s, nil
+}
+
+// EnvMap returns the spec's env entries as a key→value map, later
+// entries winning on duplicate keys. Entries were validated at Load
+// time; anything malformed (possible only via a hand-built Spec) is
+// skipped defensively.
+func (s *Spec) EnvMap() map[string]string {
+	if s == nil || len(s.Env) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(s.Env))
+	for _, e := range s.Env {
+		k, v, err := ParseEnvEntry(e)
+		if err != nil {
+			continue
+		}
+		m[k] = v
+	}
+	return m
 }
 
 // LoadFromDir loads ezkeel.yaml from exactly dir (no walk-up). Returns
