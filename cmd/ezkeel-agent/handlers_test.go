@@ -591,3 +591,73 @@ func TestHandleDBBackup_Success(t *testing.T) {
 		t.Errorf("logs = %v", resp.Logs)
 	}
 }
+
+// inspectResponder answers the two docker inspect formats the deploy and
+// rollback handlers use: the running image ID and the volume mounts.
+func inspectResponder(imageID, mounts string) func(cmd string) ([]byte, error) {
+	return func(cmd string) ([]byte, error) {
+		switch {
+		case strings.HasPrefix(cmd, "docker inspect --format {{.Image}}"):
+			return []byte(imageID + "\n"), nil
+		case strings.HasPrefix(cmd, "docker inspect --format {{range .Mounts}}"):
+			return []byte(mounts), nil
+		}
+		return nil, nil
+	}
+}
+
+const runningID = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+// The build has already moved myapp:latest to the new image when deploy
+// runs, so :prev must be tagged from the running container's image ID.
+func TestHandleDeploy_PrevTaggedByRunningImageID(t *testing.T) {
+	r := &fakeRunner{respond: inspectResponder(runningID, "")}
+	resp := handleDeploy(r, &agent.DeployRequest{AppName: "myapp", ImageTag: "myapp:latest"})
+	if !resp.OK {
+		t.Fatal(resp.Error)
+	}
+	if !r.called("docker tag " + runningID + " myapp:prev") {
+		t.Errorf(":prev not tagged from the running image ID; calls: %v", r.calls)
+	}
+	if r.called("docker tag myapp:latest") {
+		t.Errorf(":prev tagged from the moving :latest tag; calls: %v", r.calls)
+	}
+}
+
+func TestHandleDeploy_ReattachesVolumes(t *testing.T) {
+	mounts := "3f2a9c_anon:/app/cache\nstratos-data:/data\nbad name:/x\nrel:relative\n"
+	r := &fakeRunner{respond: inspectResponder(runningID, mounts)}
+	resp := handleDeploy(r, &agent.DeployRequest{AppName: "myapp", ImageTag: "myapp:latest"})
+	if !resp.OK {
+		t.Fatal(resp.Error)
+	}
+	if !r.called("-v 3f2a9c_anon:/app/cache -v stratos-data:/data") {
+		t.Errorf("volumes not carried over; calls: %v", r.calls)
+	}
+	if r.called("bad name") || r.called("rel:relative") {
+		t.Errorf("malformed mount passed to docker run; calls: %v", r.calls)
+	}
+	var inspectIdx, rmIdx int
+	for i, c := range r.calls {
+		if strings.Contains(c, "{{range .Mounts}}") {
+			inspectIdx = i
+		}
+		if c == "docker rm ezkeel-myapp" {
+			rmIdx = i
+		}
+	}
+	if inspectIdx > rmIdx {
+		t.Errorf("mounts read after the container was removed; calls: %v", r.calls)
+	}
+}
+
+func TestHandleRollback_ReattachesVolumes(t *testing.T) {
+	r := &fakeRunner{respond: inspectResponder(runningID, "appdata:/data\n")}
+	resp := handleRollback(r, &agent.RollbackRequest{AppName: "myapp", Port: 3000})
+	if !resp.OK {
+		t.Fatal(resp.Error)
+	}
+	if !r.called("-v appdata:/data") || !r.called("myapp:prev") {
+		t.Errorf("rollback did not reuse volumes on :prev; calls: %v", r.calls)
+	}
+}

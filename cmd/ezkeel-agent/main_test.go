@@ -44,7 +44,7 @@ func TestPrevImageTag(t *testing.T) {
 }
 
 func TestBuildRunArgs(t *testing.T) {
-	args := buildRunArgs("ezkeel-myapp", 3000, "512m", "1.0", map[string]string{"FOO": "bar"}, "myimage:latest")
+	args := buildRunArgs("ezkeel-myapp", 3000, "512m", "1.0", map[string]string{"FOO": "bar"}, "myimage:latest", nil)
 
 	// Last element must be the image.
 	if args[len(args)-1] != "myimage:latest" {
@@ -96,7 +96,7 @@ func TestBuildRunArgs(t *testing.T) {
 }
 
 func TestBuildRunArgs_NoLimits(t *testing.T) {
-	args := buildRunArgs("ezkeel-myapp", 3000, "", "", nil, "myimage:latest")
+	args := buildRunArgs("ezkeel-myapp", 3000, "", "", nil, "myimage:latest", nil)
 
 	for i, a := range args {
 		if a == "--memory" {

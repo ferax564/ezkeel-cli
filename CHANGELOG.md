@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bootstrap commands now prefix privileged steps with `sudo -n` so a non-root SSH user (e.g. `ubuntu`/`debian` on AWS/Vultr/Scaleway) with passwordless sudo can run `ezkeel server add` end-to-end. Root SSH users are unaffected (`sudo -n` is a no-op as root).
 
 ### Fixed
+- `ezkeel-agent` deploy tagged `<app>:prev` from the running container's image
+  *name* (`<app>:latest`), which the build had already moved to the new image,
+  so rollback restarted the new build. It now tags the running image ID.
+- `ezkeel-agent` deploy and rollback recreated the container without its
+  Docker volumes, so data in a Dockerfile `VOLUME` (an anonymous volume) was
+  left behind and the new container started empty. Both now reattach every
+  Docker-managed volume of the container they replace (`-v name:/path`).
+
 - `db_migrate` now parses `migrate_cmd` with shell-quoting rules instead of
   `strings.Fields`, so quoted arguments (e.g.
   `rails runner "User.where(active: true).count"`) survive intact.
