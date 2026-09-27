@@ -190,12 +190,17 @@ func stopAndRemove(r runner, name string) {
 }
 
 // buildRunArgs constructs the docker run argument list for an app container.
-func buildRunArgs(name string, port int, memory, cpus string, env map[string]string, image string) []string {
+// volumes are "name:/destination" mounts carried over from the container
+// being replaced.
+func buildRunArgs(name string, port int, memory, cpus string, env map[string]string, image string, volumes []string) []string {
 	args := []string{
 		"run", "-d",
 		"--name", name,
 		"--restart", "unless-stopped",
 		"--network", "ezkeel-apps",
+	}
+	for _, v := range volumes {
+		args = append(args, "-v", v)
 	}
 	for k, v := range env {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
@@ -210,6 +215,46 @@ func buildRunArgs(name string, port int, memory, cpus string, env map[string]str
 	return args
 }
 
+// runningImageID returns the image ID (sha256:…) the container runs, or ""
+// when there is no such container. The ID, not the tag, is what :prev must
+// point at: by deploy time the build has already moved <app>:latest to the
+// new image, so tagging by name would make rollback restart the new build.
+func runningImageID(r runner, container string) string {
+	out, err := r.Output("docker", "inspect", "--format", "{{.Image}}", container)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// volumeMountFormat lists a container's Docker-managed volumes, one
+// "name:/destination" per line. Bind mounts are not ezkeel's to carry over.
+const volumeMountFormat = `{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}:{{.Destination}}{{"\n"}}{{end}}{{end}}`
+
+var (
+	volumeNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+	volumeDestRe = regexp.MustCompile(`^/[^:,\s]*$`)
+)
+
+// containerVolumes returns the Docker-managed volumes mounted in the
+// container as "name:/destination", so the replacement container gets the
+// same data (including anonymous volumes from a Dockerfile VOLUME, which a
+// fresh `docker run` would otherwise replace with empty ones).
+func containerVolumes(r runner, container string) []string {
+	out, err := r.Output("docker", "inspect", "--format", volumeMountFormat, container)
+	if err != nil {
+		return nil
+	}
+	var vols []string
+	for _, line := range strings.Split(string(out), "\n") {
+		name, dest, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if ok && volumeNameRe.MatchString(name) && volumeDestRe.MatchString(dest) {
+			vols = append(vols, name+":"+dest)
+		}
+	}
+	return vols
+}
+
 func handleDeploy(r runner, req *agent.DeployRequest) *agent.Response {
 	name := containerName(req.AppName)
 	prevTag := prevImageTag(req.AppName)
@@ -219,22 +264,19 @@ func handleDeploy(r runner, req *agent.DeployRequest) *agent.Response {
 	// auto-rollback depends on :prev existing, so the operator needs to
 	// know it won't be available for this app.
 	tagWarning := ""
-	inspectOut, err := r.Output("docker", "inspect", "--format", "{{.Config.Image}}", name)
-	if err == nil {
-		currentImage := strings.TrimSpace(string(inspectOut))
-		if currentImage != "" {
-			if tagOut, tagErr := r.CombinedOutput("docker", "tag", currentImage, prevTag); tagErr != nil {
-				tagWarning = fmt.Sprintf(
-					"; warning: could not tag %s as %s — rollback will not be available for this deploy: %s: %s",
-					currentImage, prevTag, tagErr.Error(), strings.TrimSpace(string(tagOut)),
-				)
-			}
+	if currentImage := runningImageID(r, name); currentImage != "" {
+		if tagOut, tagErr := r.CombinedOutput("docker", "tag", currentImage, prevTag); tagErr != nil {
+			tagWarning = fmt.Sprintf(
+				"; warning: could not tag %s as %s — rollback will not be available for this deploy: %s: %s",
+				currentImage, prevTag, tagErr.Error(), strings.TrimSpace(string(tagOut)),
+			)
 		}
 	}
+	volumes := containerVolumes(r, name)
 
 	stopAndRemove(r, name)
 
-	args := buildRunArgs(name, req.Port, req.Memory, req.CPUs, req.Env, req.ImageTag)
+	args := buildRunArgs(name, req.Port, req.Memory, req.CPUs, req.Env, req.ImageTag, volumes)
 	out, runErr := r.CombinedOutput("docker", args...)
 	if runErr != nil {
 		return respErr(fmt.Sprintf("docker run failed: %s: %s", runErr.Error(), string(out)))
@@ -554,12 +596,13 @@ func handleRollback(r runner, req *agent.RollbackRequest) *agent.Response {
 		return respErr(fmt.Sprintf("no previous image found for %s — nothing to roll back to", req.AppName))
 	}
 
+	volumes := containerVolumes(r, name)
 	stopAndRemove(r, name)
 
 	// req.Env carries the deploy-time environment (DATABASE_URL + user
 	// env). Without it the fresh :prev container starts bare and a
 	// DB-backed app crash-loops — the pre-fix behaviour.
-	args := buildRunArgs(name, req.Port, req.Memory, req.CPUs, req.Env, prevTag)
+	args := buildRunArgs(name, req.Port, req.Memory, req.CPUs, req.Env, prevTag, volumes)
 	out, err := r.CombinedOutput("docker", args...)
 	if err != nil {
 		return respErr(fmt.Sprintf("rollback failed: %s: %s", err.Error(), string(out)))
