@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Template gallery: `codixing`, `ferrox-extract`, `officeconvert` (the Noma Cloud
+  sidecars, each behind a bearer-token gate) and a static `noma-docs-site`. Their
+  sources live in the ezkeel repository under `templates/gallery/` and are
+  published to Forgejo `ezkeel-templates/<slug>` before this list ships.
 - Agent protocol versioning: `Request`/`Response` envelopes carry
   `protocol_version` (and responses `agent_version`). Missing fields decode as
   `0`, identifying every pre-versioning binary by construction. The client
