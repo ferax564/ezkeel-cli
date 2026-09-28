@@ -28,5 +28,45 @@
     "framework": "static",
     "needs_database": false,
     "port": 80
+  },
+  {
+    "slug": "codixing",
+    "name": "Codixing Code Search",
+    "description": "Code search + dependency graph REST server for one repo, bearer-token gated",
+    "icon": "code",
+    "repo_url": "https://git.ezkeel.com/ezkeel-templates/codixing.git",
+    "framework": "dockerfile",
+    "needs_database": false,
+    "port": 8080
+  },
+  {
+    "slug": "ferrox-extract",
+    "name": "Ferrox PDF Extract",
+    "description": "PDF text extraction server (Ferrox), bearer-token gated",
+    "icon": "file-text",
+    "repo_url": "https://git.ezkeel.com/ezkeel-templates/ferrox-extract.git",
+    "framework": "dockerfile",
+    "needs_database": false,
+    "port": 8080
+  },
+  {
+    "slug": "noma-docs-site",
+    "name": "Noma Docs Site",
+    "description": "Static docs site rendered from a .noma knowledge base, served by Caddy",
+    "icon": "book",
+    "repo_url": "https://git.ezkeel.com/ezkeel-templates/noma-docs-site.git",
+    "framework": "dockerfile",
+    "needs_database": false,
+    "port": 8080
+  },
+  {
+    "slug": "officeconvert",
+    "name": "OfficeConvert",
+    "description": "Office documents to PDF with headless LibreOffice, bearer-token gated",
+    "icon": "printer",
+    "repo_url": "https://git.ezkeel.com/ezkeel-templates/officeconvert.git",
+    "framework": "dockerfile",
+    "needs_database": false,
+    "port": 8080
   }
 ]
