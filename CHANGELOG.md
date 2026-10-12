@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `DeployRequest.volumes` (agent protocol 2): declared persistent named
+  volumes, mounted as `-v ezkeel-<app>-<name>:<path>` alongside the reattached
+  Docker-managed volumes (a declared path supersedes a reattached volume at
+  the same destination). Validated by `agent.ValidateVolumes` (name
+  `^[a-z0-9-]{1,32}$`; absolute path, not `/`, no `..`, `:`, `,` or
+  whitespace) before the agent touches the running container. The client now
+  stamps each request with the lowest protocol version it needs
+  (`RequiredProtocolVersion`): only a deploy declaring volumes carries 2, so a
+  v1 agent refuses it ("update the agent") instead of starting the app without
+  its data, while every other request still reaches v1 agents.
 - Agent protocol versioning: `Request`/`Response` envelopes carry
   `protocol_version` (and responses `agent_version`). Missing fields decode as
   `0`, identifying every pre-versioning binary by construction. The client

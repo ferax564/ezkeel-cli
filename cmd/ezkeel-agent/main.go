@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -255,9 +256,44 @@ func containerVolumes(r runner, container string) []string {
 	return vols
 }
 
+// declaredVolumeArgs turns the request's declared volumes into
+// "ezkeel-<app>-<name>:<path>" mount specs. Callers validate first.
+func declaredVolumeArgs(appName string, vols []agent.VolumeMount) []string {
+	out := make([]string, 0, len(vols))
+	for _, v := range vols {
+		out = append(out, "ezkeel-"+sanitizeName(appName)+"-"+v.Name+":"+v.Path)
+	}
+	return out
+}
+
+// mergeVolumes appends the declared mounts to the reattached ones, dropping
+// any reattached volume whose destination a declared mount takes over
+// (docker run rejects two mounts on one path). A declared volume that is
+// already attached (same name and path) therefore appears exactly once.
+func mergeVolumes(reattached []string, declared []agent.VolumeMount, appName string) []string {
+	taken := make(map[string]bool, len(declared))
+	for _, v := range declared {
+		taken[path.Clean(v.Path)] = true
+	}
+	merged := make([]string, 0, len(reattached)+len(declared))
+	for _, spec := range reattached {
+		if _, dest, ok := strings.Cut(spec, ":"); ok && taken[path.Clean(dest)] {
+			continue
+		}
+		merged = append(merged, spec)
+	}
+	return append(merged, declaredVolumeArgs(appName, declared)...)
+}
+
 func handleDeploy(r runner, req *agent.DeployRequest) *agent.Response {
 	name := containerName(req.AppName)
 	prevTag := prevImageTag(req.AppName)
+
+	// Validate declared volumes before touching anything: an invalid
+	// spec must not cost the running container.
+	if err := agent.ValidateVolumes(req.Volumes, agent.MaxVolumes); err != nil {
+		return respErr("invalid volumes: " + err.Error())
+	}
 
 	// Tag the currently-running image as :prev so rollback has a target.
 	// A failed tag is NOT fatal to the deploy, but it must be surfaced:
@@ -272,7 +308,7 @@ func handleDeploy(r runner, req *agent.DeployRequest) *agent.Response {
 			)
 		}
 	}
-	volumes := containerVolumes(r, name)
+	volumes := mergeVolumes(containerVolumes(r, name), req.Volumes, req.AppName)
 
 	stopAndRemove(r, name)
 

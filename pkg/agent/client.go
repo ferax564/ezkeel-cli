@@ -55,8 +55,10 @@ func (c *Client) sshArgs(remoteCmd ...string) []string {
 // via SSH, and parses the JSON response. The context controls the SSH process
 // lifetime — if the context is canceled, the SSH process is killed.
 //
-// Send stamps the request with CurrentProtocolVersion (unless the caller
-// already set one) and warns via c.Warn when the responding agent speaks
+// Send stamps the request with RequiredProtocolVersion(req) — the lowest
+// version that can handle it, so agents one step behind keep accepting
+// requests that use no newer feature — unless the caller already set
+// one, and warns via c.Warn when the responding agent speaks
 // an older protocol than this client.
 func (c *Client) Send(ctx context.Context, req *Request) (*Response, error) {
 	stampProtocolVersion(req)
@@ -91,10 +93,13 @@ func (c *Client) Version(ctx context.Context) (*Response, error) {
 }
 
 // stampProtocolVersion fills in the request's protocol version when the
-// caller didn't set one explicitly.
+// caller didn't set one explicitly: the minimum version the request
+// needs (see RequiredProtocolVersion). A deploy declaring volumes is
+// thereby refused by an agent too old to mount them, instead of that
+// agent silently starting the app without its data volume.
 func stampProtocolVersion(req *Request) {
 	if req.ProtocolVersion == 0 {
-		req.ProtocolVersion = CurrentProtocolVersion
+		req.ProtocolVersion = RequiredProtocolVersion(req)
 	}
 }
 
