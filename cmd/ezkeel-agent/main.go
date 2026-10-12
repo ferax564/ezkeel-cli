@@ -257,11 +257,11 @@ func containerVolumes(r runner, container string) []string {
 }
 
 // declaredVolumeArgs turns the request's declared volumes into
-// "ezkeel-<app>-<name>:<path>" mount specs. Callers validate first.
+// "<agent.VolumeName(app, name)>:<path>" mount specs. Callers validate first.
 func declaredVolumeArgs(appName string, vols []agent.VolumeMount) []string {
 	out := make([]string, 0, len(vols))
 	for _, v := range vols {
-		out = append(out, "ezkeel-"+sanitizeName(appName)+"-"+v.Name+":"+v.Path)
+		out = append(out, agent.VolumeName(appName, v.Name)+":"+v.Path)
 	}
 	return out
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -89,5 +90,32 @@ func TestRequiredProtocolVersion(t *testing.T) {
 	}
 	if ProtocolVersionVolumes > CurrentProtocolVersion {
 		t.Error("ProtocolVersionVolumes must not exceed CurrentProtocolVersion")
+	}
+}
+
+func TestVolumeName_Injective(t *testing.T) {
+	if got := VolumeName("myapp", "data"); got != "ezkeel-vol.myapp.data" {
+		t.Errorf("VolumeName = %q", got)
+	}
+	// The '-'-joined collision case.
+	if VolumeName("a", "b-c") == VolumeName("a-b", "c") {
+		t.Fatal("app a/b-c and app a-b/c map to the same volume")
+	}
+	// Exhaustive over a small alphabet: distinct (app, label) pairs never
+	// share a name, and every name is a valid Docker volume name.
+	dockerVol := regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+	parts := []string{"a", "b", "-", "a-", "-a", "a-b", "b-c", "a--b", "a-b-c", "c"}
+	seen := map[string][2]string{}
+	for _, app := range parts {
+		for _, label := range parts {
+			n := VolumeName(app, label)
+			if !dockerVol.MatchString(n) {
+				t.Errorf("%q is not a valid Docker volume name", n)
+			}
+			if prev, ok := seen[n]; ok {
+				t.Errorf("collision: %v and [%s %s] -> %q", prev, app, label, n)
+			}
+			seen[n] = [2]string{app, label}
+		}
 	}
 }

@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `DeployRequest.volumes` (agent protocol 2): declared persistent named
-  volumes, mounted as `-v ezkeel-<app>-<name>:<path>` alongside the reattached
+  volumes, mounted as `-v ezkeel-vol.<app>.<name>:<path>` (`agent.VolumeName`;
+  `.` appears in neither an app name nor a label, so distinct app/label pairs
+  can never share a volume) alongside the reattached
   Docker-managed volumes (a declared path supersedes a reattached volume at
   the same destination). Validated by `agent.ValidateVolumes` (name
   `^[a-z0-9-]{1,32}$`; absolute path, not `/`, no `..`, `:`, `,` or

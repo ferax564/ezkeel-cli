@@ -100,7 +100,7 @@ type DeployRequest struct {
 	Memory     string            `json:"memory,omitempty"` // e.g. "512m", "1g"
 	CPUs       string            `json:"cpus,omitempty"`   // e.g. "1.0", "0.5"
 	// Volumes are declared persistent named volumes, mounted as
-	// -v ezkeel-<app>-<name>:<path> (protocol version 2+). They are
+	// -v ezkeel-vol.<app>.<name>:<path> (VolumeName; protocol 2+). They are
 	// mounted in addition to the Docker-managed volumes the agent
 	// reattaches from the replaced container; a declared path wins over
 	// a reattached volume at the same destination.
@@ -206,11 +206,36 @@ type AppStatus struct {
 }
 
 // VolumeMount declares a persistent named volume for an app. Name is a
-// short label (the Docker volume is "ezkeel-<app>-<name>"); Path is the
-// absolute mount point inside the container.
+// short label (the Docker volume is VolumeName(app, Name), i.e.
+// "ezkeel-vol.<app>.<name>"); Path is the absolute mount point inside the
+// container.
 type VolumeMount struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
+}
+
+// VolumeName returns the Docker volume name backing app's declared volume
+// label: "ezkeel-vol.<app>.<label>". The app part keeps only
+// [A-Za-z0-9_-] (the agent's container-name sanitiser) and labels match
+// ^[a-z0-9-]{1,32}$, so neither part can contain '.', which makes the
+// mapping injective: splitting on '.' recovers (app, label). A '-'
+// separator would not be — app "a" + label "b-c" and app "a-b" + label
+// "c" would share one volume (and its data) on a shared host. Docker
+// volume names allow [a-zA-Z0-9][a-zA-Z0-9_.-]*, so '.' is valid.
+func VolumeName(appName, label string) string {
+	return "ezkeel-vol." + sanitizeAppName(appName) + "." + label
+}
+
+// sanitizeAppName keeps only [A-Za-z0-9_-], mirroring the agent's
+// container-name sanitiser.
+func sanitizeAppName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // MaxVolumes caps declared volumes per deploy.

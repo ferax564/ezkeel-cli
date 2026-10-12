@@ -20,7 +20,7 @@ func TestHandleDeploy_MountsDeclaredVolumes(t *testing.T) {
 	if !resp.OK {
 		t.Fatal(resp.Error)
 	}
-	want := "-v 3f2a9c_anon:/app/cache -v ezkeel-myapp-data:/data -v ezkeel-myapp-uploads:/srv/up"
+	want := "-v 3f2a9c_anon:/app/cache -v ezkeel-vol.myapp.data:/data -v ezkeel-vol.myapp.uploads:/srv/up"
 	if !r.called(want) {
 		t.Errorf("declared volumes not mounted as %q; calls: %v", want, r.calls)
 	}
@@ -30,7 +30,7 @@ func TestHandleDeploy_MountsDeclaredVolumes(t *testing.T) {
 }
 
 func TestHandleDeploy_DeclaredVolumeAlreadyAttachedMountedOnce(t *testing.T) {
-	r := &fakeRunner{respond: inspectResponder(runningID, "ezkeel-myapp-data:/data\n")}
+	r := &fakeRunner{respond: inspectResponder(runningID, "ezkeel-vol.myapp.data:/data\n")}
 	resp := handleDeploy(r, &agent.DeployRequest{
 		AppName: "myapp", ImageTag: "myapp:latest",
 		Volumes: []agent.VolumeMount{{Name: "data", Path: "/data"}},
@@ -42,7 +42,7 @@ func TestHandleDeploy_DeclaredVolumeAlreadyAttachedMountedOnce(t *testing.T) {
 	for _, c := range r.calls {
 		if strings.HasPrefix(c, "docker run") {
 			ran = true
-			if n := strings.Count(c, "ezkeel-myapp-data:/data"); n != 1 {
+			if n := strings.Count(c, "ezkeel-vol.myapp.data:/data"); n != 1 {
 				t.Errorf("declared volume mounted %d times: %s", n, c)
 			}
 		}
@@ -85,5 +85,38 @@ func TestDispatch_AcceptsVolumesProtocol(t *testing.T) {
 	})
 	if !resp.OK {
 		t.Fatalf("protocol %d deploy with volumes rejected: %s", agent.ProtocolVersionVolumes, resp.Error)
+	}
+}
+
+func TestHandleDeploy_VolumeNamesDoNotCollideAcrossApps(t *testing.T) {
+	// App "a" label "b-c" vs app "a-b" label "c": a '-'-joined scheme
+	// gives both "ezkeel-a-b-c". They must get distinct volumes.
+	mount := func(app, label string) string {
+		r := &fakeRunner{respond: inspectResponder(runningID, "")}
+		resp := handleDeploy(r, &agent.DeployRequest{
+			AppName: app, ImageTag: app + ":latest",
+			Volumes: []agent.VolumeMount{{Name: label, Path: "/data"}},
+		})
+		if !resp.OK {
+			t.Fatal(resp.Error)
+		}
+		for _, c := range r.calls {
+			if strings.HasPrefix(c, "docker run") {
+				for _, f := range strings.Fields(c) {
+					if strings.HasSuffix(f, ":/data") {
+						return f
+					}
+				}
+			}
+		}
+		t.Fatalf("no /data mount; calls: %v", r.calls)
+		return ""
+	}
+	x, y := mount("a", "b-c"), mount("a-b", "c")
+	if x == y {
+		t.Fatalf("volume collision: both mount %q", x)
+	}
+	if x != "ezkeel-vol.a.b-c:/data" || y != "ezkeel-vol.a-b.c:/data" {
+		t.Errorf("got %q and %q", x, y)
 	}
 }
