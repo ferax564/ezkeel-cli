@@ -1,5 +1,13 @@
 package agent
 
+import (
+	"fmt"
+	"path"
+	"regexp"
+	"strings"
+	"unicode"
+)
+
 // CurrentProtocolVersion is the protocol version this build of the
 // package speaks. Bump it whenever the wire format changes in a way an
 // older peer cannot safely ignore (new command types, repurposed
@@ -12,12 +20,36 @@ package agent
 //	    binaries identify themselves by construction.
 //	1 — adds protocol_version/agent_version to the envelopes, the
 //	    "version" and "update" commands, and DBCreateRequest.ro_password.
+//	2 — adds DeployRequest.volumes (declared persistent named volumes).
+//	    An older agent would silently ignore the field and start the app
+//	    WITHOUT its data volume, so a deploy that declares volumes is
+//	    stamped 2 (and refused by a v1 agent with "update the agent");
+//	    every other request is still stamped MinProtocolVersion so v1
+//	    agents keep working for everything else. See RequiredProtocolVersion.
 //
 // Compatibility rule: the client warns when an agent responds with an
 // older version (the agent should be updated); the agent rejects
 // requests carrying a NEWER version than it understands with a
 // structured error instead of mis-handling them.
-const CurrentProtocolVersion = 1
+const CurrentProtocolVersion = 2
+
+// MinProtocolVersion is what Client.Send stamps on requests that use no
+// feature newer than it, so agents one protocol step behind keep
+// accepting them (agents reject requests stamped newer than they speak).
+const MinProtocolVersion = 1
+
+// ProtocolVersionVolumes is the first protocol version whose agents
+// honour DeployRequest.Volumes.
+const ProtocolVersionVolumes = 2
+
+// RequiredProtocolVersion returns the lowest protocol version an agent
+// must speak to handle req correctly.
+func RequiredProtocolVersion(req *Request) int {
+	if req != nil && req.Deploy != nil && len(req.Deploy.Volumes) > 0 {
+		return ProtocolVersionVolumes
+	}
+	return MinProtocolVersion
+}
 
 // CmdType identifies the kind of command sent to the remote agent.
 type CmdType string
@@ -67,6 +99,12 @@ type DeployRequest struct {
 	HealthPath string            `json:"health_path"`
 	Memory     string            `json:"memory,omitempty"` // e.g. "512m", "1g"
 	CPUs       string            `json:"cpus,omitempty"`   // e.g. "1.0", "0.5"
+	// Volumes are declared persistent named volumes, mounted as
+	// -v ezkeel-vol.<app>.<name>:<path> (VolumeName; protocol 2+). They are
+	// mounted in addition to the Docker-managed volumes the agent
+	// reattaches from the replaced container; a declared path wins over
+	// a reattached volume at the same destination.
+	Volumes []VolumeMount `json:"volumes,omitempty"`
 }
 
 // StopRequest carries the target app name for a stop command.
@@ -165,4 +203,112 @@ type AppStatus struct {
 	Port      int    `json:"port"`
 	URL       string `json:"url"`
 	Framework string `json:"framework,omitempty"`
+}
+
+// VolumeMount declares a persistent named volume for an app. Name is a
+// short label (the Docker volume is VolumeName(app, Name), i.e.
+// "ezkeel-vol.<app>.<name>"); Path is the absolute mount point inside the
+// container.
+type VolumeMount struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// VolumeName returns the Docker volume name backing app's declared volume
+// label: "ezkeel-vol.<app>.<label>". The app part keeps only
+// [A-Za-z0-9_-] (the agent's container-name sanitiser) and labels match
+// ^[a-z0-9-]{1,32}$, so neither part can contain '.', which makes the
+// mapping injective: splitting on '.' recovers (app, label). A '-'
+// separator would not be — app "a" + label "b-c" and app "a-b" + label
+// "c" would share one volume (and its data) on a shared host. Docker
+// volume names allow [a-zA-Z0-9][a-zA-Z0-9_.-]*, so '.' is valid.
+func VolumeName(appName, label string) string {
+	return "ezkeel-vol." + sanitizeAppName(appName) + "." + label
+}
+
+// VolumeAppNameOK reports whether appName survives VolumeName's
+// sanitiser unchanged. Only such names may declare volumes: otherwise
+// distinct names ("a.b" and "ab") would map to the same volume.
+func VolumeAppNameOK(appName string) bool {
+	return appName != "" && sanitizeAppName(appName) == appName
+}
+
+// sanitizeAppName keeps only [A-Za-z0-9_-], mirroring the agent's
+// container-name sanitiser.
+func sanitizeAppName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// MaxVolumes caps declared volumes per deploy.
+const MaxVolumes = 16
+
+var volumeLabelRe = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+
+// ValidateVolumeMount checks one declared volume. Name must match
+// ^[a-z0-9-]{1,32}$; Path must be absolute, not "/", and contain no ".."
+// segment, ":" (docker -v separator), "," or whitespace/control
+// characters. The control plane and the agent both apply it.
+func ValidateVolumeMount(v VolumeMount) error {
+	if !volumeLabelRe.MatchString(v.Name) {
+		return fmt.Errorf("volume name %q must match ^[a-z0-9-]{1,32}$", v.Name)
+	}
+	p := v.Path
+	switch {
+	case p == "":
+		return fmt.Errorf("volume %q: path is required", v.Name)
+	case len(p) > 255:
+		return fmt.Errorf("volume %q: path too long", v.Name)
+	case !strings.HasPrefix(p, "/"):
+		return fmt.Errorf("volume %q: path %q must be absolute", v.Name, p)
+	case strings.Trim(p, "/") == "":
+		return fmt.Errorf("volume %q: path must not be /", v.Name)
+	case strings.ContainsAny(p, ":,"):
+		return fmt.Errorf("volume %q: path %q must not contain ':' or ','", v.Name, p)
+	}
+	for _, r := range p {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("volume %q: path %q must not contain whitespace or control characters", v.Name, p)
+		}
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return fmt.Errorf("volume %q: path %q must not contain '..'", v.Name, p)
+		}
+	}
+	return nil
+}
+
+// ValidateVolumes checks a whole declared set: each entry valid, at most
+// max entries (MaxVolumes when max <= 0), and no duplicate names or
+// mount paths.
+func ValidateVolumes(vols []VolumeMount, max int) error {
+	if max <= 0 {
+		max = MaxVolumes
+	}
+	if len(vols) > max {
+		return fmt.Errorf("at most %d volumes allowed, got %d", max, len(vols))
+	}
+	names := make(map[string]bool, len(vols))
+	paths := make(map[string]bool, len(vols))
+	for _, v := range vols {
+		if err := ValidateVolumeMount(v); err != nil {
+			return err
+		}
+		clean := path.Clean(v.Path)
+		if names[v.Name] {
+			return fmt.Errorf("duplicate volume name %q", v.Name)
+		}
+		if paths[clean] {
+			return fmt.Errorf("duplicate volume path %q", v.Path)
+		}
+		names[v.Name] = true
+		paths[clean] = true
+	}
+	return nil
 }

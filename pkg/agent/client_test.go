@@ -62,8 +62,24 @@ func TestClient_BuildSSHArgs(t *testing.T) {
 func TestStampProtocolVersion(t *testing.T) {
 	req := &Request{Type: CmdStatus}
 	stampProtocolVersion(req)
-	if req.ProtocolVersion != CurrentProtocolVersion {
-		t.Errorf("ProtocolVersion: got %d, want %d", req.ProtocolVersion, CurrentProtocolVersion)
+	if req.ProtocolVersion != MinProtocolVersion {
+		t.Errorf("ProtocolVersion: got %d, want %d", req.ProtocolVersion, MinProtocolVersion)
+	}
+
+	// A plain deploy stays on the minimum version so older agents accept it.
+	req = &Request{Type: CmdDeploy, Deploy: &DeployRequest{AppName: "a"}}
+	stampProtocolVersion(req)
+	if req.ProtocolVersion != MinProtocolVersion {
+		t.Errorf("plain deploy: got %d, want %d", req.ProtocolVersion, MinProtocolVersion)
+	}
+
+	// A deploy declaring volumes needs an agent that mounts them.
+	req = &Request{Type: CmdDeploy, Deploy: &DeployRequest{
+		AppName: "a", Volumes: []VolumeMount{{Name: "data", Path: "/data"}},
+	}}
+	stampProtocolVersion(req)
+	if req.ProtocolVersion != ProtocolVersionVolumes {
+		t.Errorf("deploy with volumes: got %d, want %d", req.ProtocolVersion, ProtocolVersionVolumes)
 	}
 
 	// An explicit version set by the caller is preserved.

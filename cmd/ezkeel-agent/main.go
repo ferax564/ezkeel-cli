@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -255,9 +256,55 @@ func containerVolumes(r runner, container string) []string {
 	return vols
 }
 
+// declaredVolumeArgs turns the request's declared volumes into
+// "<agent.VolumeName(app, name)>:<path>" mount specs. Callers validate first.
+func declaredVolumeArgs(appName string, vols []agent.VolumeMount) []string {
+	out := make([]string, 0, len(vols))
+	for _, v := range vols {
+		out = append(out, agent.VolumeName(appName, v.Name)+":"+v.Path)
+	}
+	return out
+}
+
+// mergeVolumes appends the declared mounts to the reattached ones, dropping
+// any reattached volume whose destination a declared mount takes over
+// (docker run rejects two mounts on one path). A declared volume that is
+// already attached (same name and path) therefore appears exactly once.
+//
+// Previously declared volumes of this app (named agent.VolumeName(app, *))
+// are never carried over from the old container: the current declaration
+// is authoritative, so a declaration that moved to a new path or was
+// removed does not leave a stale mount behind (its data stays in the
+// volume until the app is purged).
+func mergeVolumes(reattached []string, declared []agent.VolumeMount, appName string) []string {
+	taken := make(map[string]bool, len(declared))
+	for _, v := range declared {
+		taken[path.Clean(v.Path)] = true
+	}
+	ownPrefix := agent.VolumeName(appName, "")
+	merged := make([]string, 0, len(reattached)+len(declared))
+	for _, spec := range reattached {
+		name, dest, ok := strings.Cut(spec, ":")
+		if ok && (taken[path.Clean(dest)] || strings.HasPrefix(name, ownPrefix)) {
+			continue
+		}
+		merged = append(merged, spec)
+	}
+	return append(merged, declaredVolumeArgs(appName, declared)...)
+}
+
 func handleDeploy(r runner, req *agent.DeployRequest) *agent.Response {
 	name := containerName(req.AppName)
 	prevTag := prevImageTag(req.AppName)
+
+	// Validate declared volumes before touching anything: an invalid
+	// spec must not cost the running container.
+	if err := agent.ValidateVolumes(req.Volumes, agent.MaxVolumes); err != nil {
+		return respErr("invalid volumes: " + err.Error())
+	}
+	if len(req.Volumes) > 0 && !agent.VolumeAppNameOK(req.AppName) {
+		return respErr("invalid volumes: app name " + strconv.Quote(req.AppName) + " must match ^[A-Za-z0-9_-]+$ to declare volumes (otherwise distinct names could share one volume)")
+	}
 
 	// Tag the currently-running image as :prev so rollback has a target.
 	// A failed tag is NOT fatal to the deploy, but it must be surfaced:
@@ -272,7 +319,7 @@ func handleDeploy(r runner, req *agent.DeployRequest) *agent.Response {
 			)
 		}
 	}
-	volumes := containerVolumes(r, name)
+	volumes := mergeVolumes(containerVolumes(r, name), req.Volumes, req.AppName)
 
 	stopAndRemove(r, name)
 
