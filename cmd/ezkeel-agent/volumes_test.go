@@ -120,3 +120,38 @@ func TestHandleDeploy_VolumeNamesDoNotCollideAcrossApps(t *testing.T) {
 		t.Errorf("got %q and %q", x, y)
 	}
 }
+
+func TestHandleDeploy_StaleDeclaredMountsDropped(t *testing.T) {
+	// "data" moved from /old to /new and "gone" was undeclared: neither old
+	// mount may survive; other apps' or anonymous volumes are kept.
+	mounts := "ezkeel-vol.myapp.data:/old\nezkeel-vol.myapp.gone:/gone\n3f2a9c_anon:/cache\n"
+	r := &fakeRunner{respond: inspectResponder(runningID, mounts)}
+	resp := handleDeploy(r, &agent.DeployRequest{
+		AppName: "myapp", ImageTag: "myapp:latest",
+		Volumes: []agent.VolumeMount{{Name: "data", Path: "/new"}},
+	})
+	if !resp.OK {
+		t.Fatal(resp.Error)
+	}
+	if !r.called("-v 3f2a9c_anon:/cache -v ezkeel-vol.myapp.data:/new") {
+		t.Errorf("unexpected mounts; calls: %v", r.calls)
+	}
+	if r.called(":/old") || r.called("ezkeel-vol.myapp.gone") {
+		t.Errorf("stale declared mount carried over; calls: %v", r.calls)
+	}
+}
+
+func TestHandleDeploy_VolumesNeedUnsanitisedAppName(t *testing.T) {
+	// "a.b" and "ab" would both map to ezkeel-vol.ab.data.
+	r := &fakeRunner{respond: inspectResponder(runningID, "")}
+	resp := handleDeploy(r, &agent.DeployRequest{
+		AppName: "a.b", ImageTag: "a.b:latest",
+		Volumes: []agent.VolumeMount{{Name: "data", Path: "/data"}},
+	})
+	if resp.OK {
+		t.Fatal("app name that changes under sanitising accepted with volumes")
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("ran commands before rejecting: %v", r.calls)
+	}
+}

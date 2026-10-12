@@ -270,14 +270,22 @@ func declaredVolumeArgs(appName string, vols []agent.VolumeMount) []string {
 // any reattached volume whose destination a declared mount takes over
 // (docker run rejects two mounts on one path). A declared volume that is
 // already attached (same name and path) therefore appears exactly once.
+//
+// Previously declared volumes of this app (named agent.VolumeName(app, *))
+// are never carried over from the old container: the current declaration
+// is authoritative, so a declaration that moved to a new path or was
+// removed does not leave a stale mount behind (its data stays in the
+// volume until the app is purged).
 func mergeVolumes(reattached []string, declared []agent.VolumeMount, appName string) []string {
 	taken := make(map[string]bool, len(declared))
 	for _, v := range declared {
 		taken[path.Clean(v.Path)] = true
 	}
+	ownPrefix := agent.VolumeName(appName, "")
 	merged := make([]string, 0, len(reattached)+len(declared))
 	for _, spec := range reattached {
-		if _, dest, ok := strings.Cut(spec, ":"); ok && taken[path.Clean(dest)] {
+		name, dest, ok := strings.Cut(spec, ":")
+		if ok && (taken[path.Clean(dest)] || strings.HasPrefix(name, ownPrefix)) {
 			continue
 		}
 		merged = append(merged, spec)
@@ -293,6 +301,9 @@ func handleDeploy(r runner, req *agent.DeployRequest) *agent.Response {
 	// spec must not cost the running container.
 	if err := agent.ValidateVolumes(req.Volumes, agent.MaxVolumes); err != nil {
 		return respErr("invalid volumes: " + err.Error())
+	}
+	if len(req.Volumes) > 0 && !agent.VolumeAppNameOK(req.AppName) {
+		return respErr("invalid volumes: app name " + strconv.Quote(req.AppName) + " must match ^[A-Za-z0-9_-]+$ to declare volumes (otherwise distinct names could share one volume)")
 	}
 
 	// Tag the currently-running image as :prev so rollback has a target.

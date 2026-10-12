@@ -226,6 +226,13 @@ func VolumeName(appName, label string) string {
 	return "ezkeel-vol." + sanitizeAppName(appName) + "." + label
 }
 
+// VolumeAppNameOK reports whether appName survives VolumeName's
+// sanitiser unchanged. Only such names may declare volumes: otherwise
+// distinct names ("a.b" and "ab") would map to the same volume.
+func VolumeAppNameOK(appName string) bool {
+	return appName != "" && sanitizeAppName(appName) == appName
+}
+
 // sanitizeAppName keeps only [A-Za-z0-9_-], mirroring the agent's
 // container-name sanitiser.
 func sanitizeAppName(name string) string {
