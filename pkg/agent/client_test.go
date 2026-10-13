@@ -110,3 +110,26 @@ func TestWarnOnVersionSkew(t *testing.T) {
 		t.Errorf("warnings = %v, want none", warnings)
 	}
 }
+
+func TestSSHArgsPort(t *testing.T) {
+	c := NewClient("example.com", "root", "")
+	for _, a := range c.sshArgs("true") {
+		if a == "-p" {
+			t.Fatalf("default port must not add -p: %v", c.sshArgs("true"))
+		}
+	}
+	c.Port = 2222
+	args := c.sshArgs("true")
+	found := false
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-p" && args[i+1] == "2222" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected -p 2222 in %v", args)
+	}
+	if args[len(args)-2] != "root@example.com" {
+		t.Fatalf("destination must precede the remote command: %v", args)
+	}
+}

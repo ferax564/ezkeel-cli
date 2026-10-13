@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 )
 
 // Client sends commands to a remote VPS over SSH.
@@ -15,6 +16,10 @@ type Client struct {
 	User     string
 	SSHKey   string
 	SSHAlias string // if set, uses "ssh <alias>" — respects full SSH config
+	// Port is the SSH port. Zero (or 22) means the ssh default, so
+	// existing callers are unchanged; a BYOV machine listening on another
+	// port (a home server behind a router, say) sets it.
+	Port int
 
 	// Warn receives human-readable compatibility warnings (e.g. the
 	// agent speaks an older protocol version than this client). Nil
@@ -45,6 +50,9 @@ func (c *Client) sshArgs(remoteCmd ...string) []string {
 	}
 	if c.SSHKey != "" {
 		args = append(args, "-i", c.SSHKey)
+	}
+	if c.Port > 0 && c.Port != 22 {
+		args = append(args, "-p", strconv.Itoa(c.Port))
 	}
 	args = append(args, c.User+"@"+c.Host)
 	args = append(args, remoteCmd...)

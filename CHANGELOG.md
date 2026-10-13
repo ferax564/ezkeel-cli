@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `agent.Client.Port`: SSH to an agent on a non-default port (`-p`). Zero or 22 keeps the old arguments, so existing callers are unchanged. Lets EZKeel deploy to a BYOV machine whose SSH listens elsewhere.
+
 ## [0.8.0] - 2026-10-12
 
 ### Added
